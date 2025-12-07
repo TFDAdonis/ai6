@@ -4,13 +4,14 @@ from pathlib import Path
 import concurrent.futures
 from datetime import datetime
 import re
-import json
+import sys
+import traceback
 
 MODEL_DIR = Path("models")
 MODEL_PATH = MODEL_DIR / "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
 MODEL_URL = "https://huggingface.co/tfdtfd/khisbagis23/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf?download=true"
 
-# Enhanced deep thinking prompts from first code
+# Enhanced deep thinking prompts
 PRESET_PROMPTS = {
     "Deep Thinker Pro": """You are a sophisticated AI thinker that excels at analysis, synthesis, and providing insightful perspectives. 
 
@@ -48,11 +49,12 @@ EXPERTISE: Satellite imagery, vegetation indices, climate analysis, urban planni
 STYLE: Enthusiastic, precise, eager to explore spatial dimensions of any topic""",
     
     "Default Assistant": "You are a helpful, friendly AI assistant. Provide clear and concise answers.",
-    "Research Analyst": """You are a professional research analyst specializing in synthesizing complex information.""",
-    "Creative Synthesizer": """You connect seemingly unrelated ideas to generate novel insights."""
+    "Research Analyst": "You are a professional research analyst specializing in synthesizing complex information.",
+    "Creative Synthesizer": "You connect seemingly unrelated ideas to generate novel insights.",
+    "Code Expert": "You are a programming expert who explains technical concepts clearly and provides working code examples."
 }
 
-# Optimized search tools from first code
+# Optimized search tools
 SEARCH_TOOLS = {
     "Wikipedia": {
         "name": "Wikipedia",
@@ -74,41 +76,85 @@ SEARCH_TOOLS = {
         "description": "Scientific publications",
         "endpoint": "http://export.arxiv.org/api/query",
         "enabled": True
-    },
-    "NewsAPI": {
-        "name": "News",
-        "icon": "📰",
-        "description": "Recent news articles",
-        "endpoint": "https://newsapi.org/v2/everything",
-        "enabled": False,  # Needs API key
-        "api_key": ""
     }
 }
 
+# Set page config FIRST
 st.set_page_config(
     page_title="SmartThink AI",
     page_icon="🧠",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
+# Custom CSS
+st.markdown("""
+<style>
+    .stChatMessage {
+        padding: 1rem;
+        border-radius: 10px;
+        margin-bottom: 1rem;
+    }
+    .search-result {
+        background-color: #f8f9fa;
+        padding: 1rem;
+        border-radius: 8px;
+        margin: 0.5rem 0;
+        border-left: 4px solid #4a90e2;
+    }
+    .source-tag {
+        display: inline-block;
+        background-color: #e3f2fd;
+        color: #1565c0;
+        padding: 0.2rem 0.5rem;
+        border-radius: 12px;
+        font-size: 0.8rem;
+        margin: 0.2rem;
+    }
+    .thinking-bubble {
+        background-color: #f0f8ff;
+        padding: 1rem;
+        border-radius: 10px;
+        margin: 1rem 0;
+        border-left: 4px solid #2196f3;
+        font-style: italic;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Initialize session state with safe defaults
+def init_session_state():
+    """Initialize all session state variables with safe defaults"""
+    default_persona = "Deep Thinker Pro"
+    
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    
+    if "model" not in st.session_state:
+        st.session_state.model = None
+    
+    if "selected_preset" not in st.session_state:
+        st.session_state.selected_preset = default_persona
+    
+    # Ensure selected_preset is valid
+    persona_options = list(PRESET_PROMPTS.keys())
+    if st.session_state.selected_preset not in persona_options:
+        st.session_state.selected_preset = default_persona
+    
+    if "system_prompt" not in st.session_state:
+        st.session_state.system_prompt = PRESET_PROMPTS[st.session_state.selected_preset]
+    
+    if "search_history" not in st.session_state:
+        st.session_state.search_history = {}
+    
+    if "enabled_sources" not in st.session_state:
+        st.session_state.enabled_sources = ["Wikipedia", "DuckDuckGo"]
+    
+    if "show_search_history" not in st.session_state:
+        st.session_state.show_search_history = False
+
 # Initialize session state
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-if "model" not in st.session_state:
-    st.session_state.model = None
-
-if "system_prompt" not in st.session_state:
-    st.session_state.system_prompt = PRESET_PROMPTS["Deep Thinker Pro"]
-
-if "selected_preset" not in st.session_state:
-    st.session_state.selected_preset = "Deep Thinker Pro"
-
-if "search_history" not in st.session_state:
-    st.session_state.search_history = {}
-
-if "last_query" not in st.session_state:
-    st.session_state.last_query = ""
+init_session_state()
 
 # ============================
 # INDEPENDENT SEARCH FUNCTIONS
@@ -117,53 +163,50 @@ if "last_query" not in st.session_state:
 def perform_independent_search(query, selected_sources=None):
     """Perform search independently without model involvement"""
     if selected_sources is None:
+        selected_sources = st.session_state.enabled_sources
+    
+    if not selected_sources:
         selected_sources = ["Wikipedia", "DuckDuckGo"]
     
     results = {}
-    search_tasks = []
     
-    # Prepare search tasks
-    for source_name in selected_sources:
-        if source_name in SEARCH_TOOLS and SEARCH_TOOLS[source_name]["enabled"]:
-            search_tasks.append((source_name, query))
-    
-    # Execute searches in parallel
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(search_tasks)) as executor:
+    # Use thread pool for parallel searches
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(selected_sources)) as executor:
         future_to_source = {}
         
-        for source_name, query in search_tasks:
-            if source_name == "Wikipedia":
-                future = executor.submit(search_wikipedia, query)
-                future_to_source[future] = source_name
-            elif source_name == "DuckDuckGo":
-                future = executor.submit(search_duckduckgo, query)
-                future_to_source[future] = source_name
-            elif source_name == "ArXiv":
-                future = executor.submit(search_arxiv, query)
-                future_to_source[future] = source_name
-            elif source_name == "NewsAPI":
-                future = executor.submit(search_news, query)
+        for source_name in selected_sources:
+            if source_name in SEARCH_TOOLS and SEARCH_TOOLS[source_name]["enabled"]:
+                if source_name == "Wikipedia":
+                    future = executor.submit(search_wikipedia, query)
+                elif source_name == "DuckDuckGo":
+                    future = executor.submit(search_duckduckgo, query)
+                elif source_name == "ArXiv":
+                    future = executor.submit(search_arxiv, query)
+                else:
+                    continue
                 future_to_source[future] = source_name
         
-        # Collect results
+        # Collect results with timeout
         for future in concurrent.futures.as_completed(future_to_source):
             source_name = future_to_source[future]
             try:
-                result = future.result(timeout=10)
+                result = future.result(timeout=8)
                 if result:
                     results[source_name] = result
             except Exception as e:
-                st.warning(f"Search failed for {source_name}: {str(e)}")
+                st.warning(f"Search failed for {source_name}: {str(e)[:100]}")
     
     # Cache results
-    st.session_state.search_history[query] = {
-        "results": results,
-        "timestamp": datetime.now().isoformat()
-    }
+    if results:
+        st.session_state.search_history[query] = {
+            "results": results,
+            "timestamp": datetime.now().isoformat(),
+            "sources": list(results.keys())
+        }
     
     return results
 
-def search_wikipedia(query, max_results=3):
+def search_wikipedia(query, max_results=2):
     """Search Wikipedia independently"""
     try:
         # Search for pages
@@ -172,13 +215,14 @@ def search_wikipedia(query, max_results=3):
             'format': 'json',
             'list': 'search',
             'srsearch': query,
-            'srlimit': max_results
+            'srlimit': max_results,
+            'utf8': 1
         }
         
         response = requests.get(
             SEARCH_TOOLS["Wikipedia"]["endpoint"],
             params=search_params,
-            timeout=10
+            timeout=8
         )
         
         if response.status_code != 200:
@@ -187,9 +231,12 @@ def search_wikipedia(query, max_results=3):
         search_data = response.json()
         pages = search_data.get('query', {}).get('search', [])
         
+        if not pages:
+            return []
+        
+        # Get page content for the first result
         results = []
-        for page in pages:
-            # Get page content
+        for page in pages[:1]:  # Just get first result for speed
             content_params = {
                 'action': 'query',
                 'format': 'json',
@@ -203,28 +250,31 @@ def search_wikipedia(query, max_results=3):
             content_response = requests.get(
                 SEARCH_TOOLS["Wikipedia"]["endpoint"],
                 params=content_params,
-                timeout=10
+                timeout=8
             )
             
             if content_response.status_code == 200:
                 page_data = content_response.json()
                 page_info = page_data.get('query', {}).get('pages', {}).get(str(page['pageid']), {})
                 
-                if page_info:
+                if page_info and page_info.get('extract'):
+                    extract = page_info.get('extract', '')
+                    # Clean up the extract
+                    extract = re.sub(r'\s+', ' ', extract)
+                    extract = re.sub(r'\n+', ' ', extract)
+                    
                     results.append({
                         'title': page_info.get('title', 'Unknown'),
-                        'summary': page_info.get('extract', '')[:500],
+                        'summary': extract[:300] + ('...' if len(extract) > 300 else ''),
                         'url': page_info.get('fullurl', ''),
                         'source': 'Wikipedia',
-                        'relevance_score': page.get('score', 0),
-                        'wordcount': page_info.get('wordcount', 0),
-                        'timestamp': page_info.get('touched', '')
+                        'wordcount': page_info.get('wordcount', 0)
                     })
         
-        return results[:max_results]
+        return results
         
     except Exception as e:
-        st.error(f"Wikipedia search error: {e}")
+        # Don't show error, just return empty
         return []
 
 def search_duckduckgo(query):
@@ -241,7 +291,7 @@ def search_duckduckgo(query):
         response = requests.get(
             SEARCH_TOOLS["DuckDuckGo"]["endpoint"],
             params=params,
-            timeout=10
+            timeout=8
         )
         
         if response.status_code != 200:
@@ -253,30 +303,40 @@ def search_duckduckgo(query):
             'abstract': data.get('AbstractText', ''),
             'answer': data.get('Answer', ''),
             'definition': data.get('Definition', ''),
-            'related_topics': [],
+            'related': [],
             'source': 'DuckDuckGo'
         }
         
         # Extract related topics
         related = data.get('RelatedTopics', [])
-        for topic in related[:5]:
+        for topic in related[:3]:
             if isinstance(topic, dict) and 'Text' in topic:
-                result['related_topics'].append(topic['Text'][:200])
+                result['related'].append(topic['Text'][:150])
+            elif isinstance(topic, str):
+                result['related'].append(topic[:150])
         
         # Clean empty values
-        result = {k: v for k, v in result.items() if v and (not isinstance(v, str) or v.strip())}
+        cleaned_result = {}
+        for key, value in result.items():
+            if isinstance(value, str) and value.strip():
+                cleaned_result[key] = value.strip()
+            elif isinstance(value, list) and value:
+                cleaned_result[key] = [v.strip() for v in value if v and v.strip()]
         
-        return result if result else {}
+        return cleaned_result if cleaned_result else {}
         
     except Exception as e:
-        st.error(f"DuckDuckGo search error: {e}")
         return {}
 
-def search_arxiv(query, max_results=3):
+def search_arxiv(query, max_results=1):
     """Search ArXiv independently"""
     try:
+        # Clean query for ArXiv
+        clean_query = re.sub(r'[^\w\s-]', ' ', query)
+        clean_query = re.sub(r'\s+', '+', clean_query.strip())
+        
         params = {
-            'search_query': f'all:{query}',
+            'search_query': f'all:{clean_query}',
             'start': 0,
             'max_results': max_results,
             'sortBy': 'relevance',
@@ -286,7 +346,7 @@ def search_arxiv(query, max_results=3):
         response = requests.get(
             SEARCH_TOOLS["ArXiv"]["endpoint"],
             params=params,
-            timeout=15
+            timeout=10
         )
         
         if response.status_code != 200:
@@ -297,108 +357,68 @@ def search_arxiv(query, max_results=3):
         root = ET.fromstring(response.content)
         
         results = []
-        for entry in root.findall('{http://www.w3.org/2005/Atom}entry'):
-            title_elem = entry.find('{http://www.w3.org/2005/Atom}title')
-            summary_elem = entry.find('{http://www.w3.org/2005/Atom}summary')
-            published_elem = entry.find('{http://www.w3.org/2005/Atom}published')
+        namespace = '{http://www.w3.org/2005/Atom}'
+        
+        for entry in root.findall(f'{namespace}entry'):
+            title_elem = entry.find(f'{namespace}title')
+            summary_elem = entry.find(f'{namespace}summary')
             
             if title_elem is not None and summary_elem is not None:
+                title = title_elem.text.strip()
+                summary = summary_elem.text.strip()
+                
+                # Clean up summary
+                summary = re.sub(r'\s+', ' ', summary)
+                
                 results.append({
-                    'title': title_elem.text.strip(),
-                    'summary': summary_elem.text.strip()[:400],
-                    'published': published_elem.text[:10] if published_elem is not None else '',
-                    'source': 'ArXiv',
-                    'relevance_score': 1.0
+                    'title': title,
+                    'summary': summary[:250] + ('...' if len(summary) > 250 else ''),
+                    'source': 'ArXiv'
                 })
+                break  # Just get first result
         
         return results
         
     except Exception as e:
-        st.error(f"ArXiv search error: {e}")
         return []
 
-def search_news(query, max_results=3):
-    """Search news independently (requires NewsAPI key)"""
-    if not SEARCH_TOOLS["NewsAPI"]["api_key"]:
-        return []
-    
-    try:
-        params = {
-            'q': query,
-            'apiKey': SEARCH_TOOLS["NewsAPI"]["api_key"],
-            'pageSize': max_results,
-            'language': 'en',
-            'sortBy': 'relevance'
-        }
-        
-        response = requests.get(
-            SEARCH_TOOLS["NewsAPI"]["endpoint"],
-            params=params,
-            timeout=10
-        )
-        
-        if response.status_code != 200:
-            return []
-        
-        data = response.json()
-        articles = data.get('articles', [])
-        
-        results = []
-        for article in articles[:max_results]:
-            results.append({
-                'title': article.get('title', ''),
-                'summary': article.get('description', '')[:300],
-                'url': article.get('url', ''),
-                'source': article.get('source', {}).get('name', 'News'),
-                'published': article.get('publishedAt', ''),
-                'relevance_score': 0.8
-            })
-        
-        return results
-        
-    except Exception as e:
-        st.error(f"News search error: {e}")
-        return []
-
-def analyze_search_results_for_prompt(query, search_results):
-    """Analyze and format search results for the model prompt"""
+def format_search_results_for_prompt(search_results):
+    """Format search results for the model prompt"""
     if not search_results:
-        return "No search results available. Please rely on your own knowledge."
+        return "No external information found from searches. Please rely on your own knowledge."
     
-    formatted_context = "SEARCH RESULTS FOR YOUR ANALYSIS:\n\n"
+    formatted = "SEARCH RESULTS AND EXTERNAL INFORMATION:\n\n"
     
     for source, results in search_results.items():
-        formatted_context += f"=== {source.upper()} RESULTS ===\n"
+        formatted += f"=== {source} ===\n"
         
         if isinstance(results, list):
-            for i, item in enumerate(results[:2], 1):
-                formatted_context += f"{i}. "
+            for i, item in enumerate(results, 1):
+                formatted += f"{i}. "
                 if 'title' in item:
-                    formatted_context += f"Title: {item['title']}\n"
+                    formatted += f"Title: {item['title']}\n"
                 if 'summary' in item:
-                    formatted_context += f"   Summary: {item['summary']}\n"
-                if 'url' in item:
-                    formatted_context += f"   URL: {item['url']}\n"
-                formatted_context += "\n"
+                    formatted += f"   Content: {item['summary']}\n"
+                formatted += "\n"
         
         elif isinstance(results, dict):
             for key, value in results.items():
-                if key not in ['source', 'relevance_score'] and value:
+                if key not in ['source'] and value:
                     if isinstance(value, list):
-                        formatted_context += f"{key}: {', '.join(str(v) for v in value[:3])}\n"
-                    else:
-                        formatted_context += f"{key}: {value}\n"
-            formatted_context += "\n"
+                        if value:
+                            formatted += f"{key}: {value[0][:200]}\n"
+                    elif isinstance(value, str):
+                        formatted += f"{key}: {value[:300]}\n"
+            formatted += "\n"
     
-    formatted_context += "\nANALYSIS INSTRUCTIONS:\n"
-    formatted_context += "1. Review these search results carefully\n"
-    formatted_context += "2. Identify the most reliable information\n"
-    formatted_context += "3. Note any contradictions between sources\n"
-    formatted_context += "4. Synthesize information into a coherent answer\n"
-    formatted_context += "5. Cite your sources when referencing specific information\n"
-    formatted_context += "6. If information is missing, acknowledge the gaps\n"
+    formatted += "\nINSTRUCTIONS:\n"
+    formatted += "1. Use this information to inform your answer\n"
+    formatted += "2. Synthesize information from multiple sources\n"
+    formatted += "3. Cite sources when using specific information\n"
+    formatted += "4. If information conflicts, mention this\n"
+    formatted += "5. Add your own analysis and insights\n"
     
-    return formatted_context
+    return formatted
 
 # ============================
 # MODEL FUNCTIONS
@@ -409,101 +429,92 @@ def download_model():
     MODEL_DIR.mkdir(exist_ok=True)
     
     if MODEL_PATH.exists():
-        file_size = MODEL_PATH.stat().st_size / (1024**3)
-        st.info(f"Model already downloaded ({file_size:.2f} GB)")
         return True
     
-    with st.spinner("Downloading model... This may take a while (~637 MB)"):
-        try:
-            response = requests.get(MODEL_URL, stream=True, timeout=60)
-            response.raise_for_status()
-            
-            total_size = int(response.headers.get('content-length', 0))
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            downloaded = 0
-            with open(MODEL_PATH, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total_size > 0:
-                            progress = downloaded / total_size
-                            progress_bar.progress(min(progress, 1.0))
-                            status_text.text(f"Downloaded: {downloaded / (1024**2):.1f} MB")
-            
-            progress_bar.empty()
-            status_text.empty()
-            
-            if MODEL_PATH.exists():
-                file_size = MODEL_PATH.stat().st_size / (1024**3)
-                st.success(f"Model downloaded successfully! ({file_size:.2f} GB)")
-                return True
-            else:
-                st.error("Download completed but file not found!")
-                return False
-                
-        except Exception as e:
-            st.error(f"Download failed: {str(e)}")
-            if MODEL_PATH.exists():
-                MODEL_PATH.unlink()
-            return False
+    try:
+        response = requests.get(MODEL_URL, stream=True, timeout=60)
+        response.raise_for_status()
+        
+        total_size = int(response.headers.get('content-length', 0))
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        downloaded = 0
+        with open(MODEL_PATH, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total_size > 0:
+                        progress = downloaded / total_size
+                        progress_bar.progress(min(progress, 1.0))
+                        status_text.text(f"Downloading: {downloaded / (1024**2):.1f} MB")
+        
+        progress_bar.empty()
+        status_text.empty()
+        
+        return MODEL_PATH.exists()
+        
+    except Exception as e:
+        st.error(f"Download error: {str(e)[:200]}")
+        return False
 
 @st.cache_resource(show_spinner=False)
-def load_model():
-    """Load the model using ctransformers"""
-    from ctransformers import AutoModelForCausalLM
-    
-    if not MODEL_PATH.exists():
-        if not download_model():
-            raise Exception("Model download failed")
-    
+def load_model_safe():
+    """Load the model with error handling"""
     try:
+        from ctransformers import AutoModelForCausalLM
+        
+        if not MODEL_PATH.exists():
+            with st.spinner("📥 Downloading model (first time only)..."):
+                if not download_model():
+                    return None
+        
         model = AutoModelForCausalLM.from_pretrained(
             str(MODEL_DIR),
             model_file=MODEL_PATH.name,
             model_type="llama",
-            context_length=4096,
+            context_length=2048,
             gpu_layers=0,
-            threads=4
+            threads=2
         )
         return model
     except Exception as e:
-        st.error(f"Model loading failed: {str(e)}")
-        raise
+        st.error(f"Model loading error: {str(e)[:200]}")
+        return None
 
-def create_smart_prompt(query, search_context, system_prompt, conversation_history):
-    """Create prompt that includes search results and thinking instructions"""
+def create_prompt_with_context(query, search_context, system_prompt, history):
+    """Create prompt with search context and conversation history"""
     
-    # Format conversation history
+    # Format recent history
     history_text = ""
-    if conversation_history:
-        history_text = "PREVIOUS CONVERSATION:\n"
-        for msg in conversation_history[-3:]:
-            role = "User" if msg["role"] == "user" else "Assistant"
-            history_text += f"{role}: {msg['content']}\n"
+    if len(history) > 1:
+        history_text = "RECENT CONVERSATION:\n"
+        for msg in history[-3:]:
+            if msg["role"] == "user":
+                history_text += f"User: {msg['content']}\n"
+            elif msg["role"] == "assistant":
+                history_text += f"Assistant: {msg['content']}\n"
         history_text += "\n"
     
-    # Create the complete prompt
     prompt = f"""<|system|>
 {system_prompt}
 
-CURRENT DATE: {datetime.now().strftime('%B %d, %Y')}
+Today's Date: {datetime.now().strftime('%Y-%m-%d')}
 
 {search_context}
 
 {history_text}
 
-INSTRUCTIONS FOR YOUR RESPONSE:
-1. Analyze the search results provided above
-2. Synthesize information from multiple sources
-3. Provide clear, well-reasoned analysis
-4. Reference sources when using specific information
-5. Acknowledge any uncertainties or gaps
-6. Maintain your persona's style and expertise
+Based on the information above and your knowledge, provide a comprehensive answer to the user's question.
 
-IMPORTANT: Your response should demonstrate deep thinking and synthesis of the search results.</s>
+Guidelines:
+- Reference specific information from search results when relevant
+- Be clear about what comes from external sources vs your own knowledge
+- If search results are limited, rely on your expertise
+- Structure your answer logically
+- End with key takeaways or follow-up questions</s>
 
 <|user|>
 {query}</s>
@@ -513,251 +524,359 @@ IMPORTANT: Your response should demonstrate deep thinking and synthesis of the s
     
     return prompt
 
-def generate_response_with_search(model, query, system_prompt, conversation_history, temperature=0.7, max_tokens=1024):
-    """Generate response using independent search results"""
+def generate_response(query, search_enabled=True):
+    """Generate response using model and optional search"""
     
-    # Step 1: Perform independent search
-    with st.spinner("🔍 Searching for information..."):
-        search_results = perform_independent_search(query)
+    # Perform search if enabled
+    search_results = {}
+    if search_enabled and st.session_state.enabled_sources:
+        with st.spinner("🔍 Searching for information..."):
+            search_results = perform_independent_search(query)
     
-    # Step 2: Format search results for prompt
-    search_context = analyze_search_results_for_prompt(query, search_results)
+    # Format search context
+    if search_results:
+        search_context = format_search_results_for_prompt(search_results)
+    else:
+        search_context = "No external search results available."
     
-    # Step 3: Create enhanced prompt
-    prompt = create_smart_prompt(query, search_context, system_prompt, conversation_history)
+    # Create prompt
+    prompt = create_prompt_with_context(
+        query=query,
+        search_context=search_context,
+        system_prompt=st.session_state.system_prompt,
+        history=st.session_state.messages
+    )
     
-    # Step 4: Generate response
-    with st.spinner("🧠 Analyzing and synthesizing information..."):
+    # Generate response
+    with st.spinner("🤔 Analyzing and generating response..."):
         try:
-            response = model(
+            response = st.session_state.model(
                 prompt,
-                max_new_tokens=max_tokens,
-                temperature=temperature,
+                max_new_tokens=768,
+                temperature=st.session_state.get('temperature', 0.7),
                 top_p=0.9,
                 repetition_penalty=1.1,
-                stop=["</s>", "<|user|>", "<|assistant|>", "\n\nUser:", "###"]
+                stop=["</s>", "<|user|>", "<|assistant|>"]
             )
             
-            # Clean up response
             response = response.strip()
             
-            # Ensure response is complete
-            if response and response[-1] not in ['.', '!', '?', ':', '"', "'"]:
-                response += "..."
-            
-            # Add source citations if we have search results
-            if search_results:
-                response += f"\n\n📚 *Information synthesized from: {', '.join(search_results.keys())}*"
+            # Ensure response ends properly
+            if response and response[-1] not in ['.', '!', '?']:
+                response += "."
             
             return response, search_results
             
         except Exception as e:
-            st.error(f"Generation error: {str(e)}")
-            return "I apologize, but I encountered an error while generating a response. Please try again.", {}
+            st.error(f"Generation error: {str(e)[:200]}")
+            return f"I apologize, but I encountered an error: {str(e)[:100]}", {}
 
 # ============================
 # STREAMLIT UI
 # ============================
 
+# Title
 st.title("🧠 SmartThink AI")
-st.caption("Independent search + LLM synthesis for intelligent responses")
+st.caption("Independent search + AI synthesis for intelligent responses")
 
-# Sidebar configuration
+# Sidebar
 with st.sidebar:
     st.header("🤖 AI Persona")
     
+    # Get persona options safely
     persona_options = list(PRESET_PROMPTS.keys())
+    current_preset = st.session_state.selected_preset
+    
+    # Ensure current preset is in options
+    if current_preset not in persona_options:
+        current_preset = "Deep Thinker Pro"
+        st.session_state.selected_preset = current_preset
+        st.session_state.system_prompt = PRESET_PROMPTS[current_preset]
+    
+    try:
+        index = persona_options.index(current_preset)
+    except ValueError:
+        index = 0
+        st.session_state.selected_preset = persona_options[0]
+        st.session_state.system_prompt = PRESET_PROMPTS[persona_options[0]]
+    
+    # Persona selector
     selected_persona = st.selectbox(
-        "Select Persona:",
+        "Select AI Persona:",
         options=persona_options,
-        index=persona_options.index(st.session_state.selected_preset)
+        index=index,
+        key="persona_selector"
     )
     
+    # Update if changed
     if selected_persona != st.session_state.selected_preset:
         st.session_state.selected_preset = selected_persona
         st.session_state.system_prompt = PRESET_PROMPTS[selected_persona]
+        st.rerun()
+    
+    # Show current persona
+    with st.expander("📝 Current Persona Details", expanded=False):
+        st.info(st.session_state.system_prompt[:500] + "..." if len(st.session_state.system_prompt) > 500 else st.session_state.system_prompt)
     
     st.divider()
     
-    st.header("🔧 Search Configuration")
+    st.header("🔍 Search Configuration")
     
-    enabled_sources = []
+    # Source selection
+    st.subheader("Select Search Sources:")
+    
+    enabled_sources = st.session_state.enabled_sources.copy()
+    
     for source_name, source_info in SEARCH_TOOLS.items():
         if source_info["enabled"]:
-            enabled = st.checkbox(
+            is_enabled = st.checkbox(
                 f"{source_info['icon']} {source_name}",
-                value=True,
+                value=source_name in enabled_sources,
+                key=f"source_{source_name}",
                 help=source_info["description"]
             )
-            if enabled:
+            
+            if is_enabled and source_name not in enabled_sources:
                 enabled_sources.append(source_name)
+            elif not is_enabled and source_name in enabled_sources:
+                enabled_sources.remove(source_name)
     
-    if not enabled_sources:
-        enabled_sources = ["Wikipedia", "DuckDuckGo"]
+    st.session_state.enabled_sources = enabled_sources
+    
+    # Search toggle
+    search_enabled = st.toggle(
+        "Enable Web Search",
+        value=bool(enabled_sources),
+        help="Turn off to use AI knowledge only"
+    )
+    
+    if not search_enabled:
+        st.info("⚠️ Web search disabled - using AI knowledge only")
     
     st.divider()
     
-    st.header("⚙️ Generation Settings")
+    st.header("⚙️ Settings")
     
     temperature = st.slider(
-        "Temperature:",
+        "Temperature (creativity):",
         min_value=0.1,
         max_value=1.5,
         value=0.7,
         step=0.1,
-        help="Higher = more creative, Lower = more focused"
+        help="Higher = more creative/random, Lower = more focused/deterministic"
     )
     
-    max_tokens = st.slider(
+    st.session_state.temperature = temperature
+    
+    response_length = st.select_slider(
         "Response Length:",
-        min_value=256,
-        max_value=2048,
-        value=1024,
-        step=256,
-        help="Maximum tokens in response"
+        options=["Short", "Medium", "Long", "Very Long"],
+        value="Medium"
     )
     
-    search_depth = st.selectbox(
-        "Search Depth:",
-        ["Quick", "Moderate", "Deep"],
-        index=1
-    )
+    # Map response length to tokens
+    length_map = {"Short": 384, "Medium": 512, "Long": 768, "Very Long": 1024}
+    st.session_state.max_tokens = length_map[response_length]
     
     st.divider()
     
+    st.header("🛠️ Actions")
+    
     col1, col2 = st.columns(2)
+    
     with col1:
-        if st.button("🔄 New Chat", use_container_width=True):
+        if st.button("🗑️ Clear Chat", use_container_width=True, type="secondary"):
             st.session_state.messages = []
-            st.session_state.search_history = {}
             st.rerun()
     
     with col2:
-        if st.button("📊 View Search History", use_container_width=True):
-            st.session_state.show_search_history = not st.session_state.get('show_search_history', False)
+        if st.button("🔄 Reset AI", use_container_width=True, type="secondary"):
+            st.session_state.selected_preset = "Deep Thinker Pro"
+            st.session_state.system_prompt = PRESET_PROMPTS["Deep Thinker Pro"]
+            st.rerun()
+    
+    if st.button("📊 View Search History", use_container_width=True):
+        st.session_state.show_search_history = not st.session_state.show_search_history
     
     st.divider()
-    st.caption("SmartThink AI v1.0")
-    st.caption("Independent search + LLM synthesis")
+    
+    st.caption("💡 **Tips:**")
+    st.caption("- Enable multiple sources for comprehensive answers")
+    st.caption("- Adjust temperature for more creative or factual responses")
+    st.caption("- Clear chat to start fresh conversations")
+    
+    st.divider()
+    st.caption("SmartThink AI v1.1")
+    st.caption("Model: TinyLLaMA 1.1B")
 
-# Load model
-if st.session_state.model is None:
-    with st.spinner("🚀 Loading AI model..."):
-        try:
-            st.session_state.model = load_model()
-            st.success("✅ Model loaded successfully!")
-        except Exception as e:
-            st.error(f"❌ Failed to load model: {str(e)}")
-            st.stop()
+# Main content area
+try:
+    # Load model if not loaded
+    if st.session_state.model is None:
+        with st.spinner("🚀 Loading AI model..."):
+            model = load_model_safe()
+            if model is None:
+                st.error("Failed to load model. Please check your connection.")
+                st.stop()
+            st.session_state.model = model
+            st.success("✅ AI model loaded successfully!")
 
-# Display chat messages
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+    # Display chat messages
+    chat_container = st.container()
+    
+    with chat_container:
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+                
+                # Show search sources if available in metadata
+                if "metadata" in message and "search_sources" in message["metadata"]:
+                    sources = message["metadata"]["search_sources"]
+                    if sources:
+                        st.markdown("<div style='margin-top: 10px;'>", unsafe_allow_html=True)
+                        for source in sources:
+                            st.markdown(f'<span class="source-tag">{source}</span>', unsafe_allow_html=True)
+                        st.markdown("</div>", unsafe_allow_html=True)
+
+    # Display search history if enabled
+    if st.session_state.show_search_history and st.session_state.search_history:
+        with st.expander("🔍 Search History (Last 5 Queries)", expanded=True):
+            recent_queries = list(st.session_state.search_history.items())[-5:]
+            
+            for query, data in reversed(recent_queries):
+                st.markdown(f"**Query:** `{query}`")
+                st.caption(f"Time: {data['timestamp'][11:19]}")
+                
+                if data['results']:
+                    for source, results in data['results'].items():
+                        with st.container():
+                            st.markdown(f"**{source}:**")
+                            
+                            if isinstance(results, list):
+                                for item in results:
+                                    if 'title' in item:
+                                        st.markdown(f"- **{item['title']}**")
+                                    if 'summary' in item:
+                                        st.markdown(f"  {item['summary'][:200]}...")
+                            elif isinstance(results, dict):
+                                for key, value in results.items():
+                                    if key not in ['source'] and value:
+                                        if isinstance(value, str):
+                                            st.markdown(f"- {key}: {value[:150]}...")
+                else:
+                    st.markdown("*No results found*")
+                
+                st.divider()
+
+    # Chat input
+    if prompt := st.chat_input("Ask me anything..."):
+        # Add user message
+        st.session_state.messages.append({"role": "user", "content": prompt})
         
-        # Show search sources if available
-        if "search_sources" in message.get("metadata", {}):
-            sources = message["metadata"]["search_sources"]
-            if sources:
-                st.caption(f"📚 Sources: {', '.join(sources)}")
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        
+        # Generate and display assistant response
+        with st.chat_message("assistant"):
+            try:
+                # Show thinking process
+                thinking_placeholder = st.empty()
+                thinking_placeholder.markdown("""
+                <div class="thinking-bubble">
+                🤔 Analyzing your question and gathering information...
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Generate response
+                response, search_results = generate_response(
+                    query=prompt,
+                    search_enabled=search_enabled and bool(st.session_state.enabled_sources)
+                )
+                
+                # Clear thinking placeholder
+                thinking_placeholder.empty()
+                
+                # Display response
+                st.markdown(response)
+                
+                # Store with metadata
+                metadata = {
+                    "search_sources": list(search_results.keys()) if search_results else [],
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": response,
+                    "metadata": metadata
+                })
+                
+                # Show search details if we have results
+                if search_results:
+                    with st.expander("📋 View Search Details", expanded=False):
+                        for source, results in search_results.items():
+                            st.markdown(f"**{SEARCH_TOOLS[source]['icon']} {source}**")
+                            
+                            if isinstance(results, list):
+                                for item in results:
+                                    if 'title' in item:
+                                        st.markdown(f"**{item['title']}**")
+                                    if 'summary' in item:
+                                        st.markdown(f"{item['summary']}")
+                                    if 'url' in item:
+                                        st.markdown(f"[Source]({item['url']})")
+                                    st.divider()
+                            elif isinstance(results, dict):
+                                for key, value in results.items():
+                                    if key not in ['source'] and value:
+                                        st.markdown(f"**{key}:** {value}")
+                            
+            except Exception as e:
+                error_msg = f"I apologize, but I encountered an error: {str(e)[:100]}"
+                st.error(error_msg)
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": error_msg,
+                    "metadata": {"error": True}
+                })
 
-# Search history viewer
-if st.session_state.get('show_search_history', False) and st.session_state.search_history:
-    with st.expander("🔍 Search History", expanded=True):
-        for query, data in list(st.session_state.search_history.items())[-5:]:
-            st.subheader(f"Query: '{query}'")
-            st.caption(f"Time: {data['timestamp']}")
-            
-            for source, results in data['results'].items():
-                st.write(f"**{source}:**")
-                if isinstance(results, list):
-                    for item in results[:2]:
-                        if 'title' in item:
-                            st.write(f"- {item['title']}")
-                elif isinstance(results, dict):
-                    for key, value in results.items():
-                        if key not in ['source'] and value:
-                            st.write(f"- {key}: {value}")
-            st.divider()
+    # Show example prompts if chat is empty
+    if not st.session_state.messages:
+        st.markdown("### 💡 Try asking about:")
+        
+        examples = [
+            "What is climate change and its main causes?",
+            "Explain how neural networks work in simple terms",
+            "Who was Albert Einstein and what were his contributions?",
+            "What are the latest developments in renewable energy?",
+            "How does the stock market work for beginners?"
+        ]
+        
+        cols = st.columns(3)
+        for idx, example in enumerate(examples):
+            with cols[idx % 3]:
+                if st.button(example, use_container_width=True):
+                    st.session_state.messages.append({"role": "user", "content": example})
+                    st.rerun()
+        
+        st.divider()
+        st.info("💡 **Tip:** The AI will search the web for current information when you ask a question!")
 
-# Chat input
-if prompt := st.chat_input("Ask me anything (I'll search and analyze):"):
-    # Add user message
-    st.session_state.messages.append({"role": "user", "content": prompt})
+except Exception as e:
+    st.error(f"An error occurred: {str(e)}")
+    st.code(f"Error details: {traceback.format_exc()[:500]}")
     
-    with st.chat_message("user"):
-        st.markdown(prompt)
+    # Offer recovery options
+    st.warning("The app encountered an error. You can try:")
     
-    # Generate response
-    with st.chat_message("assistant"):
-        try:
-            response, search_results = generate_response_with_search(
-                model=st.session_state.model,
-                query=prompt,
-                system_prompt=st.session_state.system_prompt,
-                conversation_history=st.session_state.messages,
-                temperature=temperature,
-                max_tokens=max_tokens
-            )
-            
-            st.markdown(response)
-            
-            # Store with metadata
-            metadata = {
-                "search_sources": list(search_results.keys()) if search_results else [],
-                "timestamp": datetime.now().isoformat(),
-                "temperature": temperature,
-                "max_tokens": max_tokens
-            }
-            
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": response,
-                "metadata": metadata
-            })
-            
-            # Show detailed search results
-            if search_results:
-                with st.expander("📊 View Search Results", expanded=False):
-                    for source, results in search_results.items():
-                        st.subheader(f"{SEARCH_TOOLS[source]['icon']} {source}")
-                        
-                        if isinstance(results, list):
-                            for i, item in enumerate(results[:3], 1):
-                                st.write(f"**{i}. {item.get('title', 'Result')}**")
-                                if 'summary' in item:
-                                    st.write(item['summary'])
-                                if 'url' in item:
-                                    st.caption(f"[Source]({item['url']})")
-                                st.divider()
-                        elif isinstance(results, dict):
-                            for key, value in results.items():
-                                if key not in ['source'] and value:
-                                    st.write(f"**{key}:** {value}")
-                        
-        except Exception as e:
-            st.error(f"Error generating response: {str(e)}")
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": "I apologize, but I encountered an error. Please try again.",
-                "metadata": {"error": str(e)}
-            })
-
-# Example prompts
-if not st.session_state.messages:
-    st.markdown("### 💡 Example Questions to Try:")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🔄 Restart App"):
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.rerun()
     
-    examples = [
-        "What are the latest developments in renewable energy technology?",
-        "Explain the impact of climate change on coastal cities",
-        "Who was Leonardo da Vinci and what were his most important contributions?",
-        "What is quantum computing and how does it differ from classical computing?",
-        "Compare different approaches to artificial intelligence ethics"
-    ]
-    
-    cols = st.columns(3)
-    for idx, example in enumerate(examples):
-        with cols[idx % 3]:
-            if st.button(example, use_container_width=True):
-                st.session_state.messages.append({"role": "user", "content": example})
-                st.rerun()
+    with col2:
+        if st.button("🗑️ Clear All Data"):
+            st.session_state.clear()
+            st.rerun()
