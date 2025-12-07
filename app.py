@@ -762,25 +762,6 @@ def analyze_search_results(query: str, results: dict) -> dict:
         
         if has_data:
             analysis['working_sources'].append(source)
-            
-            # Extract key facts based on source
-            if source == "duckduckgo_instant" and isinstance(data, dict) and data.get("answer"):
-                analysis['key_facts'].append({
-                    'content': data['answer'][:150],
-                    'source': 'DuckDuckGo Instant'
-                })
-            
-            elif source == "wikipedia" and isinstance(data, dict) and data.get("summary"):
-                analysis['key_facts'].append({
-                    'content': data['summary'][:150],
-                    'source': 'Wikipedia'
-                })
-            
-            elif source == "dictionary" and isinstance(data, dict) and data.get("meanings"):
-                analysis['key_facts'].append({
-                    'content': f"Word definition found for {data.get('word', 'word')}",
-                    'source': 'Dictionary'
-                })
         else:
             analysis['failed_sources'].append(source)
     
@@ -793,13 +774,6 @@ def analyze_search_results(query: str, results: dict) -> dict:
     else:
         analysis['confidence_score'] = 'low'
     
-    # Identify knowledge gaps
-    if working_count < 5:
-        analysis['knowledge_gaps'].append(f"Only {working_count}/16 sources returned data")
-    
-    if not analysis['key_facts']:
-        analysis['knowledge_gaps'].append("No key facts extracted from search results")
-    
     return analysis
 
 # ============================================
@@ -807,7 +781,7 @@ def analyze_search_results(query: str, results: dict) -> dict:
 # ============================================
 st.set_page_config(
     page_title="SmartSearch AI Pro",
-    page_icon="🔍🧠",
+    page_icon="🔍",
     layout="wide"
 )
 
@@ -821,238 +795,89 @@ if "search_results" not in st.session_state:
 if "search_analysis" not in st.session_state:
     st.session_state.search_analysis = {}
 
-if "model" not in st.session_state:
-    st.session_state.model = None
-
-if "system_prompt" not in st.session_state:
-    st.session_state.system_prompt = PRESET_PROMPTS["Khisba GIS Expert"]
-
-if "selected_preset" not in st.session_state:
-    st.session_state.selected_preset = "Khisba GIS Expert"
-
 # ============================================
-# MODEL LOADING FUNCTION
+# DISPLAY FUNCTIONS
 # ============================================
-def download_model():
-    """Download the TinyLLaMA model."""
-    MODEL_DIR.mkdir(exist_ok=True)
+def format_search_result(source_name: str, data: Any) -> str:
+    """Format a search result for display."""
+    if isinstance(data, dict):
+        if 'error' in data:
+            return ""
+        
+        if source_name == "wikipedia":
+            summary = data.get('summary', '')
+            title = data.get('title', 'Wikipedia')
+            if summary:
+                return f"**📚 Wikipedia - {title}:** {summary}"
+        
+        elif source_name == "duckduckgo_instant":
+            if data.get('answer'):
+                return f"**💡 Instant Answer:** {data['answer']}"
+            elif data.get('abstract'):
+                return f"**💡 Summary:** {data['abstract']}"
+        
+        elif source_name == "weather":
+            location = data.get('location', '')
+            condition = data.get('condition', '')
+            temp = data.get('temperature_c', '')
+            if condition != 'N/A':
+                return f"**🌤️ Weather in {location}:** {condition}, {temp}°C"
+        
+        elif source_name == "dictionary":
+            word = data.get('word', '')
+            meanings = data.get('meanings', [])
+            if meanings:
+                first_def = meanings[0]['definitions'][0]['definition']
+                return f"**📖 Dictionary - {word}:** {first_def}"
     
-    try:
-        response = requests.get(MODEL_URL, stream=True, timeout=30)
-        response.raise_for_status()
-        
-        total_size = int(response.headers.get('content-length', 0))
-        
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        downloaded = 0
-        with open(MODEL_PATH, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if total_size > 0:
-                        progress = downloaded / total_size
-                        progress_bar.progress(progress)
-                        status_text.text(f"Downloading: {downloaded / (1024**2):.1f} / {total_size / (1024**2):.1f} MB")
-        
-        progress_bar.empty()
-        status_text.empty()
-        return True
-        
-    except Exception as e:
-        return False
+    elif isinstance(data, list) and data:
+        first_item = data[0]
+        if isinstance(first_item, dict):
+            if 'error' not in first_item:
+                if source_name == "duckduckgo":
+                    body = first_item.get('body', '')
+                    title = first_item.get('title', 'Web Result')
+                    if body:
+                        return f"**🌐 {title}:** {body}"
+                
+                elif source_name == "arxiv":
+                    title = first_item.get('title', 'Research Paper')
+                    summary = first_item.get('summary', '')
+                    if summary:
+                        return f"**📄 {title}:** {summary}"
+                
+                elif source_name == "news":
+                    body = first_item.get('body', '')
+                    title = first_item.get('title', 'News')
+                    if body:
+                        return f"**📰 {title}:** {body}"
+    
+    return ""
 
-@st.cache_resource(show_spinner=False)
-def load_ai_model():
-    """Load the TinyLLaMA model."""
-    try:
-        from ctransformers import AutoModelForCausalLM
-    except ImportError:
-        st.error("Please install ctransformers: pip install ctransformers")
-        return None
+def display_best_search_results(search_results: dict, working_sources: list) -> List[str]:
+    """Display the best search results and return formatted text."""
+    formatted_results = []
     
-    if not MODEL_PATH.exists():
-        if not download_model():
-            st.error("Model download failed. Please check your internet connection.")
-            return None
-    
-    try:
-        model = AutoModelForCausalLM.from_pretrained(
-            str(MODEL_DIR),
-            model_file=MODEL_PATH.name,
-            model_type="llama",
-            context_length=2048,
-            gpu_layers=0,
-            threads=8
-        )
-        return model
-    except Exception as e:
-        st.error(f"Failed to load model: {str(e)}")
-        return None
-
-# ============================================
-# AI SYNTHESIS FUNCTIONS - SIMPLE FIX
-# ============================================
-def extract_first_search_result(search_results: dict, working_sources: list) -> str:
-    """Extract ONLY THE FIRST VALID SEARCH RESULT."""
-    
-    # Priority order of sources (Wikipedia first, then web, etc.)
-    source_priority = [
-        "wikipedia", 
-        "duckduckgo", 
+    # Priority order for display
+    display_order = [
+        "wikipedia",
         "duckduckgo_instant", 
-        "news", 
-        "arxiv", 
-        "dictionary"
+        "duckduckgo",
+        "news",
+        "dictionary",
+        "weather",
+        "arxiv",
+        "pubmed",
+        "books"
     ]
     
-    for source in source_priority:
+    for source in display_order:
         if source in working_sources and source in search_results:
-            data = search_results[source]
-            
-            if source == "wikipedia" and isinstance(data, dict):
-                if data.get('summary'):
-                    return f"📚 Wikipedia: {data['summary'][:250]}"
-            
-            elif source == "duckduckgo" and isinstance(data, list) and data:
-                first_item = data[0]
-                if isinstance(first_item, dict) and first_item.get('body'):
-                    return f"🌐 Web: {first_item['body'][:200]}"
-                elif isinstance(first_item, dict) and first_item.get('title'):
-                    return f"🌐 Web: {first_item['title'][:150]}"
-            
-            elif source == "duckduckgo_instant" and isinstance(data, dict):
-                if data.get('answer'):
-                    return f"💡 Instant Answer: {data['answer'][:200]}"
-                elif data.get('abstract'):
-                    return f"💡 Abstract: {data['abstract'][:200]}"
+            formatted = format_search_result(source, search_results[source])
+            if formatted:
+                formatted_results.append(formatted)
     
-    # If no priority sources, get any valid data
-    for source in working_sources:
-        if source in search_results:
-            data = search_results[source]
-            if isinstance(data, list) and data:
-                first_item = data[0]
-                if isinstance(first_item, dict):
-                    for field in ['summary', 'body', 'content', 'title']:
-                        if field in first_item and first_item[field]:
-                            return f"🔍 {source}: {first_item[field][:150]}"
-    
-    return "No specific search data found."
-
-def create_synthesis_prompt(query: str, conversation_history: list, system_prompt: str, 
-                           search_results: dict, search_analysis: dict) -> str:
-    """Create prompt for AI - FORCE USE OF FIRST SEARCH RESULT ONLY."""
-    
-    working_sources = search_analysis.get('working_sources', [])
-    
-    # Get ONLY THE FIRST search result
-    first_result = extract_first_search_result(search_results, working_sources)
-    
-    # STRICT INSTRUCTIONS
-    instructions = f"""
-**CRITICAL - READ CAREFULLY:**
-
-You must use ONLY this search result data. Do NOT use any other knowledge.
-
-**SEARCH RESULT (USE THIS EXACTLY):**
-{first_result}
-
-**RULES:**
-1. Paraphrase the search result above in your own words
-2. Do NOT add any information not in the search result
-3. Do NOT mention science, technology, or other topics unless in search result
-4. Start with "According to search results:"
-5. Keep it simple and factual
-6. If search result is empty or unclear, say "Search results were inconclusive"
-
-**Query:** {query}
-"""
-
-    prompt = f"""<|system|>
-{system_prompt}
-
-You are a search result summarizer. Your ONLY job is to paraphrase search results.
-
-{instructions}
-</s>
-
-<|user|>
-Based on the search result above, answer this query: "{query}"
-
-Remember: Use ONLY the search result. No extra information.
-</s>
-
-<|assistant|>
-According to search results:"""
-
-    return prompt
-
-def generate_ai_response(model, prompt: str, max_tokens: int = 256, temperature: float = 0.2) -> str:
-    """Generate AI response with VERY strict constraints."""
-    try:
-        response = model(
-            prompt,
-            max_new_tokens=max_tokens,
-            temperature=0.2,  # Very low temperature - almost deterministic
-            top_p=0.7,
-            repetition_penalty=1.3,
-            stop=["</s>", "<|user|>", "\n\n", "###", "**"],
-            stream=False
-        )
-        
-        response_text = response.strip()
-        
-        # Force search reference
-        if not response_text.startswith("According to search results:"):
-            response_text = "According to search results: " + response_text
-        
-        # Limit length
-        if len(response_text) > 300:
-            response_text = response_text[:300] + "..."
-        
-        return response_text
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-# ============================================
-# DISPLAY FUNCTIONS - Show actual search data
-# ============================================
-def display_search_results(search_results: dict, working_sources: list):
-    """Display actual search results clearly."""
-    
-    # Display the ACTUAL search results
-    st.markdown("### 🔍 Actual Search Results Found:")
-    
-    # Show Wikipedia first
-    if "wikipedia" in working_sources and search_results.get("wikipedia"):
-        wiki = search_results["wikipedia"]
-        if isinstance(wiki, dict) and wiki.get('summary'):
-            with st.expander("📚 Wikipedia Result", expanded=True):
-                st.markdown(f"**{wiki.get('title', 'Tulip Era')}**")
-                st.markdown(wiki.get('summary', '')[:300])
-                if wiki.get('url'):
-                    st.caption(f"[Read more]({wiki['url']})")
-    
-    # Show DuckDuckGo results
-    if "duckduckgo" in working_sources and search_results.get("duckduckgo"):
-        ddg = search_results["duckduckgo"]
-        if isinstance(ddg, list) and ddg:
-            with st.expander("🌐 Web Results", expanded=False):
-                for i, result in enumerate(ddg[:2]):
-                    if isinstance(result, dict):
-                        st.markdown(f"**{result.get('title', f'Result {i+1}')}**")
-                        if result.get('body'):
-                            st.markdown(result['body'][:150] + "...")
-                        if result.get('url'):
-                            st.caption(f"[Source]({result['url']})")
-    
-    # Show other sources count
-    other_sources = [s for s in working_sources if s not in ["wikipedia", "duckduckgo"]]
-    if other_sources:
-        st.caption(f"📊 Also found data from: {', '.join(other_sources[:3])}")
+    return formatted_results
 
 # ============================================
 # STREAMLIT UI
@@ -1067,6 +892,14 @@ st.markdown("""
         margin-bottom: 2rem;
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
     }
+    .result-card {
+        background: #f8f9fa;
+        border-left: 4px solid #4CAF50;
+        padding: 1rem;
+        border-radius: 5px;
+        margin: 0.5rem 0;
+        font-size: 0.95rem;
+    }
     .source-badge {
         display: inline-block;
         background: #e3f2fd;
@@ -1077,90 +910,50 @@ st.markdown("""
         margin: 0.2rem;
         border: 1px solid #bbdefb;
     }
-    .confidence-high { background: #d4edda !important; color: #155724 !important; }
-    .confidence-medium { background: #fff3cd !important; color: #856404 !important; }
-    .confidence-low { background: #f8d7da !important; color: #721c24 !important; }
-    .search-data-box {
-        background: #f8f9fa;
-        border-left: 4px solid #4CAF50;
-        padding: 1rem;
-        border-radius: 5px;
-        margin: 1rem 0;
-        font-size: 0.9rem;
-    }
 </style>
 """, unsafe_allow_html=True)
 
 # Main header
 st.markdown("""
 <div class="main-header">
-    <h1>🔍🧠 SmartSearch AI Pro</h1>
-    <h4>16-Source Search + AI Paraphrasing | Search-First Mode</h4>
+    <h1>🔍 SmartSearch Pro</h1>
+    <h4>16-Source Search Engine | Direct Results</h4>
 </div>
 """, unsafe_allow_html=True)
 
 # Sidebar
 with st.sidebar:
-    st.header("🤖 AI Persona")
+    st.header("⚙️ Settings")
     
-    persona = st.selectbox(
-        "Select AI Persona:",
-        options=list(PRESET_PROMPTS.keys()),
-        index=list(PRESET_PROMPTS.keys()).index(st.session_state.selected_preset)
-    )
-    
-    if persona != st.session_state.selected_preset:
-        st.session_state.selected_preset = persona
-        st.session_state.system_prompt = PRESET_PROMPTS[persona]
+    show_sources = st.toggle("Show Source Details", value=True)
+    auto_search = st.toggle("Auto-Search on Query", value=True)
     
     st.divider()
     
-    st.header("🔧 Settings")
+    st.header("🔍 Search Sources")
     
-    auto_search = st.toggle("Auto-Search 16 Sources", value=True)
-    show_raw_results = st.toggle("Show Raw Search Results", value=True, 
-                                  help="Show actual search data before AI response")
+    st.caption("🌐 **Web Search:**")
+    st.caption("• Wikipedia • DuckDuckGo • News")
     
-    st.divider()
+    st.caption("🔬 **Research:**")
+    st.caption("• ArXiv • PubMed • Wikidata")
     
-    st.header("⚙️ AI Parameters")
+    st.caption("📚 **Reference:**")
+    st.caption("• Dictionary • Books • Quotes")
     
-    temperature = st.slider(
-        "Temperature:",
-        0.1, 1.0, 0.2, 0.1,
-        help="Lower = more factual (0.2 recommended for search-only mode)"
-    )
+    st.caption("💻 **Developer:**")
+    st.caption("• GitHub • Stack Overflow")
     
-    response_length = st.slider(
-        "Response Length:",
-        150, 500, 250, 50
-    )
+    st.caption("🌍 **Location:**")
+    st.caption("• Weather • Air Quality • Geocoding")
     
     st.divider()
     
-    if st.button("🔄 New Chat", use_container_width=True):
+    if st.button("🔄 New Search", use_container_width=True):
         st.session_state.messages = []
         st.session_state.search_results = {}
         st.session_state.search_analysis = {}
         st.rerun()
-    
-    st.divider()
-    
-    st.markdown("**16 Search Sources:**")
-    st.caption("🌐 Web: DuckDuckGo, Wikipedia, News")
-    st.caption("🔬 Research: ArXiv, PubMed")
-    st.caption("📚 Reference: Dictionary, Books, Quotes")
-    st.caption("💻 Developer: GitHub, Stack Overflow")
-    st.caption("🌍 Location: Weather, Air Quality, Geocoding")
-    
-    st.divider()
-    
-    st.caption("⚠️ AI only paraphrases search results")
-
-# Load AI model
-if st.session_state.model is None:
-    with st.spinner("🚀 Initializing AI..."):
-        st.session_state.model = load_ai_model()
 
 # Display chat
 for message in st.session_state.messages:
@@ -1172,115 +965,98 @@ for message in st.session_state.messages:
             metadata = message["metadata"]
             cols = st.columns(2)
             with cols[0]:
-                st.caption(f"📊 Sources used: {len(metadata.get('sources', []))}/16")
+                st.caption(f"📊 {metadata.get('source_count', 0)}/16 sources")
             with cols[1]:
-                st.caption("🔒 Search-Only Mode")
+                st.caption(f"⏱️ {metadata.get('search_time', '')}")
 
 # Chat input
-if prompt := st.chat_input("Ask me anything..."):
+if prompt := st.chat_input("Search for anything..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     
     with st.chat_message("user"):
         st.markdown(prompt)
     
     with st.chat_message("assistant"):
-        # Step 1: Search
-        search_results = {}
-        search_analysis = {}
+        # Search and display results
+        with st.spinner("🔍 Searching 16 sources..."):
+            start_time = datetime.now()
+            search_results = search_all_sources(prompt)
+            search_time = (datetime.now() - start_time).total_seconds()
+            search_analysis = analyze_search_results(prompt, search_results)
         
-        if auto_search:
-            search_status = st.empty()
-            search_status.info("🔍 Searching 16 sources...")
-            
-            with st.spinner("Getting real data from sources..."):
-                search_results = search_all_sources(prompt)
-                search_analysis = analyze_search_results(prompt, search_results)
-            
-            working_count = len(search_analysis.get('working_sources', []))
-            
-            # SHOW ACTUAL SEARCH RESULTS FIRST
-            if show_raw_results and working_count > 0:
-                display_search_results(search_results, search_analysis.get('working_sources', []))
+        working_sources = search_analysis.get('working_sources', [])
+        working_count = len(working_sources)
         
-        # Step 2: AI Synthesis (FORCED TO USE SEARCH)
-        if st.session_state.model:
-            ai_status = st.empty()
-            ai_status.info("🧠 Paraphrasing search results...")
+        # Display search stats
+        cols = st.columns(3)
+        with cols[0]:
+            st.metric("Sources Found", f"{working_count}/16")
+        with cols[1]:
+            confidence = search_analysis.get('confidence_score', 'low')
+            st.metric("Confidence", confidence.capitalize())
+        with cols[2]:
+            st.metric("Search Time", f"{search_time:.1f}s")
+        
+        # Get and display formatted results
+        formatted_results = display_best_search_results(search_results, working_sources)
+        
+        if formatted_results:
+            st.markdown("### 📋 Search Results:")
             
-            try:
-                # Create prompt with FORCED search usage
-                synthesis_prompt = create_synthesis_prompt(
-                    prompt,
-                    st.session_state.messages,
-                    st.session_state.system_prompt,
-                    search_results,
-                    search_analysis
-                )
-                
-                # Generate response
-                with st.spinner("Processing..."):
-                    ai_response = generate_ai_response(
-                        st.session_state.model,
-                        synthesis_prompt,
-                        max_tokens=response_length,
-                        temperature=temperature
-                    )
-                
-                ai_status.empty()
-                
-                # Display AI response
-                st.markdown(ai_response)
-                
-                # Show disclaimer
-                st.caption("⚠️ This response is based ONLY on search results, not AI knowledge")
-                
-                # Store message
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": ai_response,
-                    "metadata": {
-                        "sources": search_analysis.get('working_sources', []),
-                        "working_count": working_count,
-                        "search_based": True
-                    }
-                })
-                
-            except Exception as e:
-                ai_status.error(f"AI Error: {str(e)}")
-                
-                # Show raw search data instead
-                st.info("Showing raw search data:")
-                if search_results.get("wikipedia"):
-                    wiki = search_results["wikipedia"]
-                    if isinstance(wiki, dict) and wiki.get('summary'):
-                        st.markdown(f"**Wikipedia says:** {wiki['summary'][:200]}...")
-                elif search_results.get("duckduckgo"):
-                    ddg = search_results["duckduckgo"]
-                    if isinstance(ddg, list) and ddg and ddg[0].get('body'):
-                        st.markdown(f"**Web result:** {ddg[0]['body'][:200]}...")
+            for result in formatted_results[:5]:  # Show top 5 results
+                st.markdown(f'<div class="result-card">{result}</div>', unsafe_allow_html=True)
+            
+            # Show sources if enabled
+            if show_sources and working_sources:
+                with st.expander("📊 View All Sources", expanded=False):
+                    cols = st.columns(4)
+                    for idx, source in enumerate(working_sources[:12]):
+                        with cols[idx % 4]:
+                            st.markdown(f'<span class="source-badge">{source}</span>', unsafe_allow_html=True)
+            
+            # Generate simple summary
+            if formatted_results:
+                first_result = formatted_results[0]
+                # Extract just the text part (after the colon)
+                if ":**" in first_result:
+                    summary_text = first_result.split(":**", 1)[1].strip()
+                    ai_response = f"**Based on search results:** {summary_text[:300]}..."
                 else:
-                    st.warning("No search data found")
+                    ai_response = f"**Search found information about:** {prompt}"
+            else:
+                ai_response = f"Search returned limited information about {prompt}."
+        
         else:
-            # Show search results directly
-            st.warning("AI model not loaded. Showing search results:")
-            if search_results.get("wikipedia"):
-                wiki = search_results["wikipedia"]
-                st.markdown(f"**From Wikipedia:** {wiki.get('summary', 'No summary')[:200]}...")
-            elif search_results.get("duckduckgo"):
-                ddg = search_results["duckduckgo"]
-                if isinstance(ddg, list) and ddg and ddg[0].get('body'):
-                    st.markdown(f"**Web result:** {ddg[0]['body'][:200]}...")
+            st.warning(f"⚠️ No clear information found from search ({working_count}/16 sources responded)")
+            ai_response = f"No specific information found about '{prompt}' in search results."
+        
+        # Store message
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": ai_response,
+            "metadata": {
+                "sources": working_sources,
+                "source_count": working_count,
+                "confidence": search_analysis.get('confidence_score', 'low'),
+                "search_time": f"{search_time:.1f}s"
+            }
+        })
+        
+        # Store search data
+        st.session_state.search_results = search_results
+        st.session_state.search_analysis = search_analysis
 
 # Quick examples
 if not st.session_state.messages:
-    st.markdown("### 💡 Example Queries:")
+    st.markdown("### 💡 Try searching for:")
     
     examples = [
-        "Tulip Era",
-        "Weather in Tokyo",
-        "Machine learning",
+        "The dancing plague",
+        "Tulip Era Ottoman",
+        "Weather in Paris",
+        "Machine learning basics",
         "Python programming",
-        "Climate change"
+        "Climate change effects"
     ]
     
     cols = st.columns(3)
@@ -1292,4 +1068,4 @@ if not st.session_state.messages:
 
 # Footer
 st.divider()
-st.caption("SmartSearch AI Pro | 16 Search Sources + TinyLLaMA AI | 🔒 Search-First Paraphrasing Only")
+st.caption("SmartSearch Pro | 16-Source Search Engine | Direct Results Only")
