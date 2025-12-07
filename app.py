@@ -1,705 +1,246 @@
 import streamlit as st
-from pathlib import Path
+from arxiv_service import search_arxiv
+from duckduckgo_service import search_duckduckgo, get_instant_answer, search_news
+from wikipedia_service import search_wikipedia
+from weather_service import get_weather_wttr
+from openaq_service import get_air_quality
+from wikidata_service import search_wikidata
+from openlibrary_service import search_books
+from pubmed_service import search_pubmed
+from nominatim_service import geocode_location
+from dictionary_service import get_definition
+from countries_service import search_country
+from quotes_service import search_quotes
+from github_service import search_github_repos
+from stackexchange_service import search_stackoverflow
 import concurrent.futures
-from datetime import datetime
-import re
+import os
 import requests
-import json
-import xml.etree.ElementTree as ET
-from typing import Dict, List, Optional, Any
+from pathlib import Path
 
-# ============================================
-# MODEL CONFIGURATION
-# ============================================
+# ========== AI Model Configuration ==========
 MODEL_DIR = Path("models")
 MODEL_PATH = MODEL_DIR / "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
 MODEL_URL = "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
 
-# ============================================
-# AI PERSONAS
-# ============================================
 PRESET_PROMPTS = {
-    "Khisba GIS Expert": """You are Khisba GIS - a passionate remote sensing/GIS specialist with deep analytical skills.
-
-CORE IDENTITY:
+    "Khisba GIS": """You are Khisba GIS, an enthusiastic remote sensing and GIS expert. Your personality:
 - Name: Khisba GIS
-- Role: Senior Remote Sensing & GIS Analyst
-- Style: Enthusiastic, precise, and approachable
-- Expertise: Satellite imagery, vegetation indices, climate analysis, urban planning, disaster monitoring
+- Role: Remote sensing and GIS expert
+- Style: Warm, friendly, and approachable
+- Expertise: Deep knowledge of satellite imagery, vegetation indices, and geospatial analysis
+- Humor: Light and professional
+- Always eager to explore new remote sensing challenges
 
-RESPONSE STYLE:
-- Reference search findings when available
-- Provide concrete examples from GIS/remote sensing
-- Use clear, professional language with occasional enthusiasm
-- End with actionable insights or suggestions""",
-
-    "Deep Thinker Pro": """You are a sophisticated AI thinker that excels at analysis, synthesis, and providing insightful perspectives.
-
-THINKING FRAMEWORK:
-1. **Comprehension**: Understand the query fully
-2. **Contextualization**: Place topic in historical/cultural context
-3. **Multi-Source Analysis**: Examine information critically
-4. **Pattern Recognition**: Identify connections and gaps
-5. **Synthesis**: Combine insights coherently
-6. **Critical Evaluation**: Assess reliability and significance""",
-
-    "Research Analyst": """You are a professional research analyst specializing in synthesizing complex information.
-
-ANALYTICAL APPROACH:
-1. **Source Triangulation**: Cross-reference multiple sources
-2. **Credibility Assessment**: Evaluate source reliability
-3. **Trend Identification**: Spot patterns and anomalies
-4. **Comparative Analysis**: Similarities/differences across contexts
-5. **Implication Mapping**: Consequences and applications
-6. **Knowledge Gaps**: Identify what's missing""",
-
-    "Technical Expert": """You are a technical expert with deep knowledge across multiple domains.
-
-EXPERTISE AREAS:
-- Programming and software development
-- Scientific concepts and research
-- Technical documentation and explanations
-- System architecture and design
-- Data analysis and visualization
-
-RESPONSE APPROACH:
-- Provide clear, accurate technical information
-- Include examples when relevant
-- Explain complex concepts simply
-- Reference best practices and standards""",
-
-    "Creative Synthesizer": """You connect seemingly unrelated ideas to generate novel insights.
-
-CREATIVE PROCESS:
-1. **Divergent Thinking**: Generate multiple interpretations
-2. **Analogical Reasoning**: Find similar patterns elsewhere
-3. **Metaphorical Connection**: Use metaphors for illumination
-4. **Interdisciplinary Bridging**: Connect across fields
-5. **Future Projection**: Explore evolution possibilities
-6. **Alternative Framing**: Different conceptualizations"""
+Guidelines:
+- Focus primarily on remote sensing, GIS, and satellite imagery topics
+- Be naturally enthusiastic about helping with vegetation indices and analysis
+- Share practical examples and real-world applications
+- Show genuine interest in the user's remote sensing challenges
+- If topics go outside remote sensing, gently guide back to GIS
+- Always introduce yourself as Khisba GIS when asked who you are""",
+    "Default Assistant": "You are a helpful, friendly AI assistant. Provide clear and concise answers.",
+    "Professional Expert": "You are a professional expert. Provide detailed, accurate, and well-structured responses. Use formal language and cite reasoning when appropriate.",
+    "Creative Writer": "You are a creative writer with a vivid imagination. Use descriptive language, metaphors, and engaging storytelling in your responses.",
+    "Code Helper": "You are a programming expert. Provide clean, well-commented code examples. Explain technical concepts clearly and suggest best practices.",
+    "Friendly Tutor": "You are a patient and encouraging tutor. Explain concepts step by step, use simple examples, and ask questions to ensure understanding.",
+    "Concise Responder": "You are brief and to the point. Give short, direct answers without unnecessary elaboration.",
+    "Custom": ""
 }
 
-# ============================================
-# SEARCH SERVICE FUNCTIONS (All included directly)
-# ============================================
+# ========== Streamlit Page Config ==========
+st.set_page_config(
+    page_title="AI Search Assistant with Local LLM",
+    page_icon="🔍🦙",
+    layout="wide"
+)
 
-# 1. ArXiv Search
-def search_arxiv(query: str, max_results: int = 3) -> List[Dict]:
-    """Search ArXiv for scientific papers."""
+st.title("🔍🦙 AI-Powered Multi-Source Search Assistant")
+st.markdown("*Search 16 sources simultaneously, then get AI-enhanced analysis*")
+
+# ========== Session State Initialization ==========
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "model_loaded" not in st.session_state:
+    st.session_state.model_loaded = False
+
+if "system_prompt" not in st.session_state:
+    st.session_state.system_prompt = PRESET_PROMPTS["Khisba GIS"]
+
+if "selected_preset" not in st.session_state:
+    st.session_state.selected_preset = "Khisba GIS"
+
+# ========== Sidebar ==========
+with st.sidebar:
+    st.header("🔧 Configuration")
+    
+    # Model settings in sidebar
+    st.subheader("AI Model Settings")
+    
+    selected_preset = st.selectbox(
+        "Choose AI Persona:",
+        options=list(PRESET_PROMPTS.keys()),
+        index=list(PRESET_PROMPTS.keys()).index(st.session_state.selected_preset),
+        key="preset_selector"
+    )
+    
+    if selected_preset != st.session_state.selected_preset:
+        st.session_state.selected_preset = selected_preset
+        if selected_preset != "Custom":
+            st.session_state.system_prompt = PRESET_PROMPTS[selected_preset]
+    
+    system_prompt = st.text_area(
+        "System Prompt:",
+        value=st.session_state.system_prompt,
+        height=150,
+        placeholder="Enter instructions for how the AI should behave...",
+        key="system_prompt_input"
+    )
+    
+    if system_prompt != st.session_state.system_prompt:
+        st.session_state.system_prompt = system_prompt
+        if system_prompt not in PRESET_PROMPTS.values():
+            st.session_state.selected_preset = "Custom"
+    
+    temperature = st.slider("Temperature", 0.1, 2.0, 0.7, 0.1, 
+                           help="Higher = more creative, Lower = more focused")
+    max_tokens = st.slider("Max Tokens", 64, 1024, 256, 64,
+                          help="Maximum length of the AI response")
+    
+    st.divider()
+    
+    # Sources information
+    st.header("📊 16 Search Sources")
+    with st.expander("View all sources"):
+        st.markdown("""
+        **Web & Knowledge:**
+        - DuckDuckGo Web Search
+        - DuckDuckGo Instant Answers
+        - DuckDuckGo News
+        - Wikipedia
+        - Wikidata
+        
+        **Science & Research:**
+        - ArXiv (Scientific Papers)
+        - PubMed (Medical Research)
+        
+        **Reference:**
+        - OpenLibrary (Books)
+        - Dictionary API
+        - REST Countries
+        - Quotable (Quotes)
+        
+        **Developer:**
+        - GitHub Repositories
+        - Stack Overflow Q&A
+        
+        **Location & Environment:**
+        - Nominatim (Geocoding)
+        - wttr.in (Weather)
+        - OpenAQ (Air Quality)
+        """)
+    
+    st.divider()
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🗑️ Clear Chat", type="secondary", use_container_width=True):
+            st.session_state.messages = []
+            st.rerun()
+    with col2:
+        if st.button("🔄 Reset AI", type="secondary", use_container_width=True):
+            st.session_state.system_prompt = PRESET_PROMPTS["Default Assistant"]
+            st.session_state.selected_preset = "Default Assistant"
+            st.rerun()
+
+# ========== Display Chat History ==========
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# ========== Helper Functions ==========
+def download_model():
+    """Download the model from Hugging Face with progress."""
+    MODEL_DIR.mkdir(exist_ok=True)
+    
     try:
-        url = "http://export.arxiv.org/api/query"
-        params = {
-            'search_query': f'all:{query}',
-            'start': 0,
-            'max_results': max_results,
-            'sortBy': 'relevance'
-        }
-        response = requests.get(url, params=params, timeout=10)
+        response = requests.get(MODEL_URL, stream=True, timeout=30)
         response.raise_for_status()
-        
-        root = ET.fromstring(response.content)
-        papers = []
-        
-        for entry in root.findall('{http://www.w3.org/2005/Atom}entry'):
-            title_elem = entry.find('{http://www.w3.org/2005/Atom}title')
-            summary_elem = entry.find('{http://www.w3.org/2005/Atom}summary')
-            
-            if title_elem is not None and title_elem.text and summary_elem is not None and summary_elem.text:
-                title = title_elem.text.strip().replace('\n', ' ')
-                summary = summary_elem.text.strip().replace('\n', ' ')
-                
-                # Extract authors
-                authors = []
-                for author in entry.findall('{http://www.w3.org/2005/Atom}author'):
-                    name_elem = author.find('{http://www.w3.org/2005/Atom}name')
-                    if name_elem is not None and name_elem.text:
-                        authors.append(name_elem.text.strip())
-                
-                # Extract published date
-                published_elem = entry.find('{http://www.w3.org/2005/Atom}published')
-                published = published_elem.text[:10] if published_elem is not None and published_elem.text else ''
-                
-                # Extract link
-                link = ''
-                for link_elem in entry.findall('{http://www.w3.org/2005/Atom}link'):
-                    if link_elem.get('title') == 'pdf':
-                        link = link_elem.get('href', '')
-                        break
-                
-                papers.append({
-                    'title': title,
-                    'summary': summary[:300] + '...' if len(summary) > 300 else summary,
-                    'authors': authors[:3],
-                    'published': published,
-                    'url': link,
-                    'source': 'arxiv'
-                })
-        
-        return papers[:max_results]
-    except Exception as e:
-        return [{'error': f"ArXiv search failed: {str(e)}"}]
-
-# 2. DuckDuckGo Search
-def search_duckduckgo(query: str, max_results: int = 5) -> List[Dict]:
-    """Search DuckDuckGo for web results."""
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Failed to download model: {str(e)}")
+    
+    total_size = int(response.headers.get('content-length', 0))
+    
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    downloaded = 0
     try:
-        url = "https://api.duckduckgo.com/"
-        params = {
-            'q': query,
-            'format': 'json',
-            'no_html': 1,
-            'skip_disambig': 1
-        }
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        
-        results = []
-        
-        # Add instant answer if available
-        if data.get('AbstractText'):
-            results.append({
-                'title': 'Instant Answer',
-                'body': data['AbstractText'],
-                'url': data.get('AbstractURL', ''),
-                'source': 'duckduckgo'
-            })
-        
-        # Add related topics
-        for topic in data.get('RelatedTopics', [])[:max_results-1]:
-            if isinstance(topic, dict) and topic.get('Text') and topic.get('FirstURL'):
-                results.append({
-                    'title': topic.get('Text', '')[:100],
-                    'body': '',
-                    'url': topic.get('FirstURL', ''),
-                    'source': 'duckduckgo'
-                })
-        
-        return results[:max_results]
+        with open(MODEL_PATH, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total_size > 0:
+                        progress = downloaded / total_size
+                        progress_bar.progress(progress)
+                        status_text.text(f"Downloading: {downloaded / (1024**2):.1f} / {total_size / (1024**2):.1f} MB")
     except Exception as e:
-        return [{'error': f"DuckDuckGo search failed: {str(e)}"}]
+        if MODEL_PATH.exists():
+            MODEL_PATH.unlink()
+        raise Exception(f"Download interrupted: {str(e)}")
+    
+    if total_size > 0 and downloaded != total_size:
+        if MODEL_PATH.exists():
+            MODEL_PATH.unlink()
+        raise Exception(f"Incomplete download: got {downloaded} bytes, expected {total_size}")
+    
+    progress_bar.empty()
+    status_text.empty()
+    return True
 
-# 3. DuckDuckGo Instant Answer
-def get_instant_answer(query: str) -> Dict:
-    """Get instant answer from DuckDuckGo."""
-    try:
-        url = "https://api.duckduckgo.com/"
-        params = {
-            'q': query,
-            'format': 'json',
-            'no_html': 1
-        }
-        response = requests.get(url, params=params, timeout=8)
-        response.raise_for_status()
-        data = response.json()
-        
-        result = {}
-        if data.get('Answer'):
-            result['answer'] = data['Answer']
-        if data.get('AbstractText'):
-            result['abstract'] = data['AbstractText']
-        if data.get('Definition'):
-            result['definition'] = data['Definition']
-        if data.get('Redirect'):
-            result['redirect'] = data['Redirect']
-        
-        return result if result else {'error': 'No instant answer found'}
-    except Exception as e:
-        return {'error': f"Instant answer failed: {str(e)}"}
+@st.cache_resource(show_spinner=False)
+def load_model():
+    """Load the TinyLLaMA model using ctransformers."""
+    from ctransformers import AutoModelForCausalLM
+    
+    if not MODEL_PATH.exists():
+        with st.spinner("Downloading TinyLLaMA model (~637 MB)..."):
+            download_model()
+    
+    model = AutoModelForCausalLM.from_pretrained(
+        str(MODEL_DIR),
+        model_file=MODEL_PATH.name,
+        model_type="llama",
+        context_length=2048,
+        gpu_layers=0
+    )
+    return model
 
-# 4. Wikipedia Search
-def search_wikipedia(query: str) -> Dict:
-    """Search Wikipedia for articles."""
-    try:
-        # First, search for pages
-        search_url = "https://en.wikipedia.org/w/api.php"
-        params = {
-            'action': 'query',
-            'format': 'json',
-            'list': 'search',
-            'srsearch': query,
-            'srlimit': 1
-        }
-        response = requests.get(search_url, params=params, timeout=8)
-        response.raise_for_status()
-        data = response.json()
-        
-        if not data.get('query', {}).get('search'):
-            return {'error': 'No Wikipedia article found'}
-        
-        page_id = data['query']['search'][0]['pageid']
-        title = data['query']['search'][0]['title']
-        
-        # Get page content
-        params = {
-            'action': 'query',
-            'format': 'json',
-            'prop': 'extracts|info',
-            'inprop': 'url',
-            'exintro': 1,
-            'explaintext': 1,
-            'pageids': page_id
-        }
-        response = requests.get(search_url, params=params, timeout=8)
-        response.raise_for_status()
-        data = response.json()
-        
-        pages = data.get('query', {}).get('pages', {})
-        if not pages:
-            return {'error': 'Could not fetch Wikipedia content'}
-        
-        page = pages.get(str(page_id), {})
-        
-        return {
-            'exists': True,
-            'title': page.get('title', title),
-            'summary': page.get('extract', '')[:500],
-            'url': page.get('fullurl', f'https://en.wikipedia.org/wiki/{title.replace(" ", "_")}'),
-            'source': 'wikipedia'
-        }
-    except Exception as e:
-        return {'error': f"Wikipedia search failed: {str(e)}"}
+def truncate_messages(messages, max_messages=10):
+    """Keep only the most recent messages to fit within context limit."""
+    if len(messages) > max_messages:
+        return messages[-max_messages:]
+    return messages
 
-# 5. Weather Search
-def get_weather_wttr(query: str) -> Dict:
-    """Get weather information from wttr.in."""
-    try:
-        url = f"https://wttr.in/{requests.utils.quote(query)}?format=j1"
-        response = requests.get(url, timeout=8)
-        response.raise_for_status()
-        data = response.json()
-        
-        current = data.get('current_condition', [{}])[0]
-        location = data.get('nearest_area', [{}])[0]
-        
-        return {
-            'location': location.get('areaName', [{}])[0].get('value', query),
-            'temperature_c': current.get('temp_C', 'N/A'),
-            'temperature_f': current.get('temp_F', 'N/A'),
-            'condition': current.get('weatherDesc', [{}])[0].get('value', 'N/A'),
-            'humidity': current.get('humidity', 'N/A'),
-            'wind_speed': current.get('windspeedKmph', 'N/A'),
-            'source': 'weather'
-        }
-    except Exception as e:
-        return {'error': f"Weather search failed: {str(e)}"}
+def format_prompt(messages, system_prompt=""):
+    """Format conversation history for TinyLLaMA chat format with system prompt."""
+    prompt = ""
+    
+    if system_prompt:
+        prompt += f"<|system|>\n{system_prompt}</s>\n"
+    
+    for msg in messages:
+        if msg["role"] == "user":
+            prompt += f"<|user|>\n{msg['content']}</s>\n"
+        elif msg["role"] == "assistant":
+            prompt += f"<|assistant|>\n{msg['content']}</s>\n"
+    prompt += "<|assistant|>\n"
+    return prompt
 
-# 6. Air Quality Search
-def get_air_quality(query: str) -> Dict:
-    """Get air quality information from OpenAQ."""
-    try:
-        url = f"https://api.openaq.org/v2/latest"
-        params = {
-            'limit': 3,
-            'city': query
-        }
-        response = requests.get(url, params=params, timeout=8)
-        response.raise_for_status()
-        data = response.json()
-        
-        if not data.get('results'):
-            return {'error': 'No air quality data found'}
-        
-        locations = []
-        for result in data['results'][:2]:
-            measurements = []
-            for param in result.get('measurements', [])[:3]:
-                measurements.append({
-                    'parameter': param.get('parameter', ''),
-                    'value': param.get('value', ''),
-                    'unit': param.get('unit', '')
-                })
-            
-            locations.append({
-                'location': result.get('location', ''),
-                'city': result.get('city', query),
-                'country': result.get('country', ''),
-                'measurements': measurements
-            })
-        
-        return {
-            'city': query,
-            'data': locations,
-            'source': 'air_quality'
-        }
-    except Exception as e:
-        return {'error': f"Air quality search failed: {str(e)}"}
-
-# 7. Wikidata Search
-def search_wikidata(query: str, max_results: int = 3) -> List[Dict]:
-    """Search Wikidata for entities."""
-    try:
-        url = "https://www.wikidata.org/w/api.php"
-        params = {
-            'action': 'wbsearchentities',
-            'format': 'json',
-            'language': 'en',
-            'search': query,
-            'limit': max_results
-        }
-        response = requests.get(url, params=params, timeout=8)
-        response.raise_for_status()
-        data = response.json()
-        
-        entities = []
-        for entity in data.get('search', [])[:max_results]:
-            entities.append({
-                'label': entity.get('label', ''),
-                'description': entity.get('description', ''),
-                'id': entity.get('id', ''),
-                'url': f"https://www.wikidata.org/wiki/{entity.get('id', '')}",
-                'source': 'wikidata'
-            })
-        
-        return entities
-    except Exception as e:
-        return [{'error': f"Wikidata search failed: {str(e)}"}]
-
-# 8. OpenLibrary Books Search
-def search_books(query: str, max_results: int = 5) -> List[Dict]:
-    """Search OpenLibrary for books."""
-    try:
-        url = "https://openlibrary.org/search.json"
-        params = {
-            'q': query,
-            'limit': max_results
-        }
-        response = requests.get(url, params=params, timeout=8)
-        response.raise_for_status()
-        data = response.json()
-        
-        books = []
-        for doc in data.get('docs', [])[:max_results]:
-            authors = doc.get('author_name', [])
-            if isinstance(authors, list):
-                authors = authors[:2]
-            
-            books.append({
-                'title': doc.get('title', ''),
-                'authors': authors,
-                'first_publish_year': doc.get('first_publish_year', ''),
-                'publisher': doc.get('publisher', [])[0] if doc.get('publisher') else '',
-                'url': f"https://openlibrary.org{doc.get('key', '')}",
-                'source': 'books'
-            })
-        
-        return books
-    except Exception as e:
-        return [{'error': f"Books search failed: {str(e)}"}]
-
-# 9. PubMed Search
-def search_pubmed(query: str, max_results: int = 3) -> List[Dict]:
-    """Search PubMed for medical articles."""
-    try:
-        url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
-        params = {
-            'db': 'pubmed',
-            'term': query,
-            'retmode': 'json',
-            'retmax': max_results
-        }
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        
-        ids = data.get('esearchresult', {}).get('idlist', [])
-        if not ids:
-            return [{'error': 'No PubMed articles found'}]
-        
-        # Get details for each article
-        details_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
-        params = {
-            'db': 'pubmed',
-            'id': ','.join(ids),
-            'retmode': 'json'
-        }
-        response = requests.get(details_url, params=params, timeout=10)
-        response.raise_for_status()
-        details = response.json()
-        
-        articles = []
-        for article_id in ids[:max_results]:
-            article_data = details.get('result', {}).get(article_id, {})
-            authors = []
-            for author in article_data.get('authors', [])[:2]:
-                if isinstance(author, dict):
-                    authors.append(author.get('name', ''))
-            
-            articles.append({
-                'title': article_data.get('title', ''),
-                'authors': authors,
-                'year': article_data.get('pubdate', '')[:4],
-                'journal': article_data.get('source', ''),
-                'url': f"https://pubmed.ncbi.nlm.nih.gov/{article_id}/",
-                'source': 'pubmed'
-            })
-        
-        return articles
-    except Exception as e:
-        return [{'error': f"PubMed search failed: {str(e)}"}]
-
-# 10. Geocoding (Nominatim)
-def geocode_location(query: str) -> Dict:
-    """Geocode location using Nominatim."""
-    try:
-        url = "https://nominatim.openstreetmap.org/search"
-        params = {
-            'q': query,
-            'format': 'json',
-            'limit': 1
-        }
-        headers = {
-            'User-Agent': 'SmartSearchAI/1.0'
-        }
-        response = requests.get(url, params=params, headers=headers, timeout=8)
-        response.raise_for_status()
-        data = response.json()
-        
-        if not data:
-            return {'error': 'Location not found'}
-        
-        location = data[0]
-        return {
-            'display_name': location.get('display_name', ''),
-            'latitude': location.get('lat', ''),
-            'longitude': location.get('lon', ''),
-            'osm_url': f"https://www.openstreetmap.org/?mlat={location.get('lat')}&mlon={location.get('lon')}",
-            'source': 'geocoding'
-        }
-    except Exception as e:
-        return {'error': f"Geocoding failed: {str(e)}"}
-
-# 11. Dictionary Definition
-def get_definition(word: str) -> Dict:
-    """Get dictionary definition."""
-    try:
-        url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{word}"
-        response = requests.get(url, timeout=8)
-        
-        if response.status_code == 404:
-            return {'error': 'Word not found in dictionary'}
-        
-        response.raise_for_status()
-        data = response.json()
-        
-        if not data or not isinstance(data, list):
-            return {'error': 'Invalid dictionary response'}
-        
-        entry = data[0]
-        meanings = []
-        
-        for meaning in entry.get('meanings', [])[:2]:
-            definitions = []
-            for definition in meaning.get('definitions', [])[:2]:
-                definitions.append({
-                    'definition': definition.get('definition', ''),
-                    'example': definition.get('example', '')
-                })
-            
-            meanings.append({
-                'part_of_speech': meaning.get('partOfSpeech', ''),
-                'definitions': definitions
-            })
-        
-        phonetics = []
-        for phonetic in entry.get('phonetics', []):
-            if phonetic.get('text'):
-                phonetics.append(phonetic['text'])
-        
-        return {
-            'word': entry.get('word', word),
-            'phonetics': phonetics[:3],
-            'meanings': meanings,
-            'source': 'dictionary'
-        }
-    except Exception as e:
-        return {'error': f"Dictionary search failed: {str(e)}"}
-
-# 12. Country Information
-def search_country(query: str) -> Dict:
-    """Search for country information."""
-    try:
-        url = f"https://restcountries.com/v3.1/name/{query}"
-        response = requests.get(url, timeout=8)
-        
-        if response.status_code == 404:
-            return {'error': 'Country not found'}
-        
-        response.raise_for_status()
-        data = response.json()
-        
-        if not data:
-            return {'error': 'No country data found'}
-        
-        country = data[0]
-        
-        # Get languages
-        languages = []
-        if country.get('languages'):
-            languages = list(country['languages'].values())[:3]
-        
-        # Get currencies
-        currencies = []
-        if country.get('currencies'):
-            for currency_code, currency_info in country['currencies'].items():
-                currencies.append(f"{currency_info.get('name', '')} ({currency_code})")
-        
-        return {
-            'name': country.get('name', {}).get('common', query),
-            'official_name': country.get('name', {}).get('official', ''),
-            'capital': country.get('capital', [''])[0],
-            'region': country.get('region', ''),
-            'subregion': country.get('subregion', ''),
-            'population': country.get('population', 0),
-            'languages': languages,
-            'currencies': currencies[:2],
-            'flag_emoji': country.get('flag', ''),
-            'map_url': f"https://www.google.com/maps?q={country.get('latlng', [0,0])[0]},{country.get('latlng', [0,0])[1]}",
-            'source': 'country'
-        }
-    except Exception as e:
-        return {'error': f"Country search failed: {str(e)}"}
-
-# 13. Quotes Search
-def search_quotes(query: str, max_results: int = 3) -> List[Dict]:
-    """Search for quotes."""
-    try:
-        url = "https://api.quotable.io/search/quotes"
-        params = {
-            'query': query,
-            'limit': max_results
-        }
-        response = requests.get(url, params=params, timeout=8)
-        response.raise_for_status()
-        data = response.json()
-        
-        quotes = []
-        for quote in data.get('results', [])[:max_results]:
-            quotes.append({
-                'content': quote.get('content', ''),
-                'author': quote.get('author', 'Unknown'),
-                'tags': quote.get('tags', [])[:3],
-                'source': 'quotes'
-            })
-        
-        return quotes
-    except Exception as e:
-        return [{'error': f"Quotes search failed: {str(e)}"}]
-
-# 14. GitHub Repositories Search
-def search_github_repos(query: str, max_results: int = 3) -> List[Dict]:
-    """Search GitHub for repositories."""
-    try:
-        url = "https://api.github.com/search/repositories"
-        params = {
-            'q': query,
-            'sort': 'stars',
-            'order': 'desc',
-            'per_page': max_results
-        }
-        headers = {
-            'Accept': 'application/vnd.github.v3+json'
-        }
-        response = requests.get(url, params=params, headers=headers, timeout=8)
-        response.raise_for_status()
-        data = response.json()
-        
-        repos = []
-        for repo in data.get('items', [])[:max_results]:
-            repos.append({
-                'name': repo.get('name', ''),
-                'full_name': repo.get('full_name', ''),
-                'description': repo.get('description', '')[:150],
-                'language': repo.get('language', ''),
-                'stars': repo.get('stargazers_count', 0),
-                'forks': repo.get('forks_count', 0),
-                'url': repo.get('html_url', ''),
-                'source': 'github'
-            })
-        
-        return repos
-    except Exception as e:
-        return [{'error': f"GitHub search failed: {str(e)}"}]
-
-# 15. Stack Overflow Search
-def search_stackoverflow(query: str, max_results: int = 3) -> List[Dict]:
-    """Search Stack Overflow for questions."""
-    try:
-        url = "https://api.stackexchange.com/2.3/search"
-        params = {
-            'order': 'desc',
-            'sort': 'relevance',
-            'intitle': query,
-            'site': 'stackoverflow',
-            'pagesize': max_results
-        }
-        response = requests.get(url, params=params, timeout=8)
-        response.raise_for_status()
-        data = response.json()
-        
-        questions = []
-        for question in data.get('items', [])[:max_results]:
-            questions.append({
-                'title': question.get('title', ''),
-                'is_answered': question.get('is_answered', False),
-                'score': question.get('score', 0),
-                'answer_count': question.get('answer_count', 0),
-                'view_count': question.get('view_count', 0),
-                'tags': question.get('tags', [])[:3],
-                'url': question.get('link', ''),
-                'source': 'stackoverflow'
-            })
-        
-        return questions
-    except Exception as e:
-        return [{'error': f"Stack Overflow search failed: {str(e)}"}]
-
-# 16. News Search (using DuckDuckGo news)
-def search_news(query: str, max_results: int = 3) -> List[Dict]:
-    """Search for news articles."""
-    try:
-        url = "https://api.duckduckgo.com/"
-        params = {
-            'q': query,
-            'format': 'json',
-            'no_html': 1
-        }
-        response = requests.get(url, params=params, timeout=8)
-        response.raise_for_status()
-        data = response.json()
-        
-        news_items = []
-        
-        # Check for news in the response
-        if data.get('AbstractText') and 'news' in query.lower():
-            news_items.append({
-                'title': 'Latest News',
-                'body': data['AbstractText'][:200],
-                'url': data.get('AbstractURL', ''),
-                'source': 'news',
-                'date': datetime.now().strftime('%Y-%m-%d')
-            })
-        
-        # Add related topics as news-like items
-        for topic in data.get('RelatedTopics', [])[:max_results]:
-            if isinstance(topic, dict) and topic.get('Text'):
-                news_items.append({
-                    'title': topic.get('Text', '')[:100],
-                    'body': '',
-                    'url': topic.get('FirstURL', ''),
-                    'source': 'news',
-                    'date': datetime.now().strftime('%Y-%m-%d')
-                })
-        
-        return news_items[:max_results]
-    except Exception as e:
-        return [{'error': f"News search failed: {str(e)}"}]
-
-# ============================================
-# MAIN SEARCH FUNCTION
-# ============================================
 def search_all_sources(query: str) -> dict:
-    """Search ALL 16 sources simultaneously."""
+    """Search ALL sources simultaneously."""
     results = {}
     
     def safe_search(name, func, *args, **kwargs):
@@ -710,7 +251,6 @@ def search_all_sources(query: str) -> dict:
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
         first_word = query.split()[0] if query.strip() else query
-        
         futures = {
             executor.submit(safe_search, "arxiv", search_arxiv, query, 3): "arxiv",
             executor.submit(safe_search, "duckduckgo", search_duckduckgo, query, 5): "duckduckgo",
@@ -739,333 +279,343 @@ def search_all_sources(query: str) -> dict:
     
     return results
 
-def analyze_search_results(query: str, results: dict) -> dict:
-    """Analyze search results independently."""
-    analysis = {
-        'key_facts': [],
-        'source_count': len(results),
-        'working_sources': [],
-        'failed_sources': [],
-        'confidence_score': 0,
-        'knowledge_gaps': []
-    }
+def format_results_for_ai(query: str, results: dict) -> str:
+    """Format search results into a concise text for AI processing."""
+    context_parts = []
     
-    # Check each source
-    for source, data in results.items():
-        # Check if source has valid data (not an error)
-        has_data = False
-        
-        if isinstance(data, dict):
-            has_data = "error" not in data and data.get("error") is None
-        elif isinstance(data, list):
-            has_data = len(data) > 0 and not ("error" in str(data[0]) if data else False)
-        
-        if has_data:
-            analysis['working_sources'].append(source)
-        else:
-            analysis['failed_sources'].append(source)
+    context_parts.append(f"User query: {query}")
+    context_parts.append("\n=== SEARCH RESULTS SUMMARY ===\n")
     
-    # Calculate confidence
-    working_count = len(analysis['working_sources'])
-    if working_count >= 10:
-        analysis['confidence_score'] = 'high'
-    elif working_count >= 6:
-        analysis['confidence_score'] = 'medium'
-    else:
-        analysis['confidence_score'] = 'low'
+    if "duckduckgo_instant" in results:
+        instant = results["duckduckgo_instant"]
+        if isinstance(instant, dict) and instant.get("answer"):
+            context_parts.append(f"Quick Answer: {instant['answer']}")
     
-    return analysis
+    if "wikipedia" in results:
+        wiki = results["wikipedia"]
+        if isinstance(wiki, dict) and wiki.get("exists"):
+            context_parts.append(f"Wikipedia Summary: {wiki.get('summary', '')[:300]}")
+    
+    if "duckduckgo" in results:
+        ddg = results["duckduckgo"]
+        if isinstance(ddg, list) and ddg and "error" not in ddg[0]:
+            context_parts.append("Top Web Results:")
+            for i, item in enumerate(ddg[:3], 1):
+                context_parts.append(f"  {i}. {item.get('title', '')} - {item.get('body', '')[:150]}")
+    
+    if "arxiv" in results:
+        arxiv_data = results["arxiv"]
+        if isinstance(arxiv_data, list) and arxiv_data and "error" not in arxiv_data[0]:
+            context_parts.append("Scientific Papers:")
+            for paper in arxiv_data[:2]:
+                authors = ", ".join(paper.get("authors", [])[:2])
+                context_parts.append(f"  - {paper.get('title', '')} by {authors}")
+    
+    if "pubmed" in results:
+        pubmed_data = results["pubmed"]
+        if isinstance(pubmed_data, list) and pubmed_data and "error" not in pubmed_data[0] and "message" not in pubmed_data[0]:
+            context_parts.append("Medical Research:")
+            for article in pubmed_data[:2]:
+                context_parts.append(f"  - {article.get('title', '')}")
+    
+    if "books" in results:
+        books_data = results["books"]
+        if isinstance(books_data, list) and books_data and "error" not in books_data[0]:
+            context_parts.append("Books:")
+            for book in books_data[:2]:
+                authors = ", ".join(book.get("authors", [])[:2])
+                context_parts.append(f"  - {book.get('title', '')} by {authors}")
+    
+    if "weather" in results:
+        weather = results["weather"]
+        if isinstance(weather, dict) and "error" not in weather:
+            context_parts.append(f"Weather: {weather.get('location', '')} - {weather.get('temperature_c', '')}°C, {weather.get('condition', '')}")
+    
+    if "country" in results:
+        country = results["country"]
+        if isinstance(country, dict) and "error" not in country and "message" not in country:
+            context_parts.append(f"Country Info: {country.get('name', '')}, Capital: {country.get('capital', '')}, Population: {country.get('population', '')}")
+    
+    if "news" in results:
+        news_data = results["news"]
+        if isinstance(news_data, list) and news_data and "error" not in news_data[0] and "message" not in news_data[0]:
+            context_parts.append("Recent News:")
+            for article in news_data[:2]:
+                context_parts.append(f"  - {article.get('title', '')}")
+    
+    context_parts.append("\n=== END OF SEARCH RESULTS ===\n")
+    context_parts.append(f"Based on the search results above, please provide a comprehensive answer to the user's query: '{query}'")
+    
+    return "\n".join(context_parts)
 
-# ============================================
-# STREAMLIT APP SETUP
-# ============================================
-st.set_page_config(
-    page_title="SmartSearch AI Pro",
-    page_icon="🔍",
-    layout="wide"
-)
+def format_results_display(query: str, results: dict) -> str:
+    """Format all search results into a readable display format (original function kept intact)."""
+    output = [f"## Search Results for: *{query}*\n"]
+    
+    if "duckduckgo_instant" in results:
+        instant = results["duckduckgo_instant"]
+        if isinstance(instant, dict) and instant.get("answer"):
+            output.append(f"### 💡 Quick Answer\n{instant['answer']}\n")
+    
+    if "wikipedia" in results:
+        wiki = results["wikipedia"]
+        if isinstance(wiki, dict) and wiki.get("exists"):
+            output.append(f"### 📚 Wikipedia: {wiki.get('title', 'N/A')}")
+            output.append(f"{wiki.get('summary', 'No summary')[:500]}...")
+            output.append(f"[Read more]({wiki.get('url', '')})\n")
+    
+    if "duckduckgo" in results:
+        ddg = results["duckduckgo"]
+        if isinstance(ddg, list) and ddg and "error" not in ddg[0]:
+            output.append("### 🌐 Web Results")
+            for item in ddg[:3]:
+                output.append(f"- **{item.get('title', 'N/A')}**")
+                output.append(f"  {item.get('body', '')[:150]}...")
+                if item.get('url'):
+                    output.append(f"  [Link]({item.get('url')})")
+            output.append("")
+    
+    if "arxiv" in results:
+        arxiv_data = results["arxiv"]
+        if isinstance(arxiv_data, list) and arxiv_data and "error" not in arxiv_data[0]:
+            output.append("### 🔬 Scientific Papers (ArXiv)")
+            for paper in arxiv_data[:3]:
+                authors = ", ".join(paper.get("authors", [])[:2])
+                output.append(f"- **{paper.get('title', 'N/A')}**")
+                output.append(f"  Authors: {authors} | Published: {paper.get('published', 'N/A')}")
+                output.append(f"  {paper.get('summary', '')[:200]}...")
+                if paper.get('url'):
+                    output.append(f"  [View Paper]({paper.get('url')})")
+            output.append("")
+    
+    if "pubmed" in results:
+        pubmed_data = results["pubmed"]
+        if isinstance(pubmed_data, list) and pubmed_data and "error" not in pubmed_data[0] and "message" not in pubmed_data[0]:
+            output.append("### 🏥 Medical Research (PubMed)")
+            for article in pubmed_data[:3]:
+                authors = ", ".join(article.get("authors", [])[:2])
+                output.append(f"- **{article.get('title', 'N/A')}**")
+                output.append(f"  Authors: {authors} | Year: {article.get('year', 'N/A')}")
+                output.append(f"  {article.get('abstract', '')[:200]}...")
+                if article.get('url'):
+                    output.append(f"  [View Article]({article.get('url')})")
+            output.append("")
+    
+    if "books" in results:
+        books_data = results["books"]
+        if isinstance(books_data, list) and books_data and "error" not in books_data[0]:
+            output.append("### 📖 Books (OpenLibrary)")
+            for book in books_data[:3]:
+                authors = ", ".join(book.get("authors", [])[:2])
+                output.append(f"- **{book.get('title', 'N/A')}**")
+                output.append(f"  Authors: {authors} | First Published: {book.get('first_publish_year', 'N/A')}")
+                if book.get('url'):
+                    output.append(f"  [View Book]({book.get('url')})")
+            output.append("")
+    
+    if "wikidata" in results:
+        wikidata = results["wikidata"]
+        if isinstance(wikidata, list) and wikidata and "error" not in wikidata[0]:
+            output.append("### 🗃️ Wikidata Entities")
+            for entity in wikidata[:3]:
+                output.append(f"- **{entity.get('label', 'N/A')}**: {entity.get('description', 'No description')}")
+                if entity.get('url'):
+                    output.append(f"  [View]({entity.get('url')})")
+            output.append("")
+    
+    if "weather" in results:
+        weather = results["weather"]
+        if isinstance(weather, dict) and "error" not in weather:
+            output.append("### 🌤️ Weather")
+            output.append(f"- Location: {weather.get('location', 'N/A')}")
+            output.append(f"- Temperature: {weather.get('temperature_c', 'N/A')}°C / {weather.get('temperature_f', 'N/A')}°F")
+            output.append(f"- Condition: {weather.get('condition', 'N/A')}")
+            output.append(f"- Humidity: {weather.get('humidity', 'N/A')}%")
+            output.append("")
+    
+    if "air_quality" in results:
+        aq = results["air_quality"]
+        if isinstance(aq, dict) and "error" not in aq and aq.get("data"):
+            output.append("### 🌬️ Air Quality")
+            output.append(f"- City: {aq.get('city', 'N/A')}")
+            for loc in aq.get("data", [])[:2]:
+                output.append(f"- Location: {loc.get('location', 'N/A')}")
+                for m in loc.get("measurements", [])[:3]:
+                    output.append(f"  - {m.get('parameter', 'N/A')}: {m.get('value', 'N/A')} {m.get('unit', '')}")
+            output.append("")
+    
+    if "geocoding" in results:
+        geo = results["geocoding"]
+        if isinstance(geo, dict) and "error" not in geo:
+            output.append("### 📍 Location Info")
+            output.append(f"- {geo.get('display_name', 'N/A')}")
+            output.append(f"- Coordinates: {geo.get('latitude', 'N/A')}, {geo.get('longitude', 'N/A')}")
+            if geo.get('osm_url'):
+                output.append(f"- [View on Map]({geo.get('osm_url')})")
+            output.append("")
+    
+    if "news" in results:
+        news_data = results["news"]
+        if isinstance(news_data, list) and news_data and "error" not in news_data[0] and "message" not in news_data[0]:
+            output.append("### 📰 News")
+            for article in news_data[:3]:
+                output.append(f"- **{article.get('title', 'N/A')}**")
+                if article.get('source'):
+                    output.append(f"  Source: {article.get('source')} | {article.get('date', '')}")
+                output.append(f"  {article.get('body', '')[:150]}...")
+                if article.get('url'):
+                    output.append(f"  [Read Article]({article.get('url')})")
+            output.append("")
+    
+    if "dictionary" in results:
+        dictionary = results["dictionary"]
+        if isinstance(dictionary, dict) and "error" not in dictionary and "message" not in dictionary:
+            output.append(f"### 📖 Dictionary: {dictionary.get('word', 'N/A')}")
+            phonetics = dictionary.get('phonetics', [])
+            if phonetics:
+                output.append(f"*Pronunciation: {', '.join(phonetics)}*")
+            for meaning in dictionary.get('meanings', [])[:2]:
+                output.append(f"**{meaning.get('part_of_speech', '')}**")
+                for defn in meaning.get('definitions', [])[:2]:
+                    output.append(f"- {defn.get('definition', '')}")
+                    if defn.get('example'):
+                        output.append(f"  *Example: \"{defn.get('example')}\"*")
+            output.append("")
+    
+    if "country" in results:
+        country = results["country"]
+        if isinstance(country, dict) and "error" not in country and "message" not in country:
+            output.append(f"### 🌍 Country: {country.get('name', 'N/A')} {country.get('flag_emoji', '')}")
+            output.append(f"- **Official Name**: {country.get('official_name', 'N/A')}")
+            output.append(f"- **Capital**: {country.get('capital', 'N/A')}")
+            output.append(f"- **Region**: {country.get('region', 'N/A')} / {country.get('subregion', 'N/A')}")
+            output.append(f"- **Population**: {country.get('population', 'N/A'):,}" if isinstance(country.get('population'), int) else f"- **Population**: {country.get('population', 'N/A')}")
+            languages = country.get('languages', [])
+            if languages:
+                output.append(f"- **Languages**: {', '.join(languages[:3])}")
+            currencies = country.get('currencies', [])
+            if currencies:
+                output.append(f"- **Currencies**: {', '.join(currencies[:2])}")
+            if country.get('map_url'):
+                output.append(f"- [View on Map]({country.get('map_url')})")
+            output.append("")
+    
+    if "quotes" in results:
+        quotes_data = results["quotes"]
+        if isinstance(quotes_data, list) and quotes_data and "error" not in quotes_data[0] and "message" not in quotes_data[0]:
+            output.append("### 💬 Quotes")
+            for quote in quotes_data[:3]:
+                output.append(f"> \"{quote.get('content', '')}\"")
+                output.append(f"> — *{quote.get('author', 'Unknown')}*")
+                output.append("")
+    
+    if "github" in results:
+        github_data = results["github"]
+        if isinstance(github_data, list) and github_data and "error" not in github_data[0] and "message" not in github_data[0]:
+            output.append("### 💻 GitHub Repositories")
+            for repo in github_data[:3]:
+                output.append(f"- **{repo.get('name', 'N/A')}** ⭐ {repo.get('stars', 0):,}")
+                output.append(f"  {repo.get('description', 'No description')[:100]}...")
+                output.append(f"  Language: {repo.get('language', 'N/A')} | Forks: {repo.get('forks', 0):,}")
+                if repo.get('url'):
+                    output.append(f"  [View Repository]({repo.get('url')})")
+            output.append("")
+    
+    if "stackoverflow" in results:
+        so_data = results["stackoverflow"]
+        if isinstance(so_data, list) and so_data and "error" not in so_data[0] and "message" not in so_data[0]:
+            output.append("### 🔧 Stack Overflow")
+            for q in so_data[:3]:
+                answered_emoji = "✅" if q.get('is_answered') else "❓"
+                output.append(f"- {answered_emoji} **{q.get('title', 'N/A')}**")
+                output.append(f"  Score: {q.get('score', 0)} | Answers: {q.get('answer_count', 0)} | Views: {q.get('view_count', 0):,}")
+                tags = q.get('tags', [])[:3]
+                if tags:
+                    output.append(f"  Tags: {', '.join(tags)}")
+                if q.get('url'):
+                    output.append(f"  [View Question]({q.get('url')})")
+            output.append("")
+    
+    return "\n".join(output)
 
-# Initialize session state
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+def generate_ai_response(model, search_context, query, system_prompt="", max_tokens=256, temperature=0.7):
+    """Generate AI response based on search results."""
+    from ctransformers import AutoModelForCausalLM
+    
+    # Create a special prompt for the AI with search results
+    ai_prompt = f"<|system|>\n{system_prompt}\n\nYou have access to search results from multiple sources. Use these results to answer the user's question. If the search results don't contain enough information, say so and provide general knowledge based on your training.</s>\n"
+    ai_prompt += f"<|user|>\nHere are the search results for '{query}':\n\n{search_context}\n\nBased on these results, please answer: {query}</s>\n"
+    ai_prompt += "<|assistant|>\n"
+    
+    response = model(
+        ai_prompt,
+        max_new_tokens=max_tokens,
+        temperature=temperature,
+        top_p=0.95,
+        stop=["</s>", "<|user|>", "<|assistant|>", "<|system|>"]
+    )
+    
+    return response.strip()
 
-if "search_results" not in st.session_state:
-    st.session_state.search_results = {}
+# ========== Load Model ==========
+with st.spinner("Loading TinyLLaMA model... This may take a moment on first run."):
+    try:
+        model = load_model()
+        st.session_state.model_loaded = True
+    except Exception as e:
+        st.error(f"Failed to load model: {str(e)}")
+        st.stop()
 
-if "search_analysis" not in st.session_state:
-    st.session_state.search_analysis = {}
+if st.session_state.model_loaded:
+    st.success("AI Model loaded and ready!", icon="✅")
 
-# ============================================
-# DISPLAY FUNCTIONS
-# ============================================
-def format_search_result(source_name: str, data: Any) -> str:
-    """Format a search result for display."""
-    if isinstance(data, dict):
-        if 'error' in data:
-            return ""
-        
-        if source_name == "wikipedia":
-            summary = data.get('summary', '')
-            title = data.get('title', 'Wikipedia')
-            if summary:
-                return f"**📚 Wikipedia - {title}:** {summary}"
-        
-        elif source_name == "duckduckgo_instant":
-            if data.get('answer'):
-                return f"**💡 Instant Answer:** {data['answer']}"
-            elif data.get('abstract'):
-                return f"**💡 Summary:** {data['abstract']}"
-        
-        elif source_name == "weather":
-            location = data.get('location', '')
-            condition = data.get('condition', '')
-            temp = data.get('temperature_c', '')
-            if condition != 'N/A':
-                return f"**🌤️ Weather in {location}:** {condition}, {temp}°C"
-        
-        elif source_name == "dictionary":
-            word = data.get('word', '')
-            meanings = data.get('meanings', [])
-            if meanings:
-                first_def = meanings[0]['definitions'][0]['definition']
-                return f"**📖 Dictionary - {word}:** {first_def}"
-    
-    elif isinstance(data, list) and data:
-        first_item = data[0]
-        if isinstance(first_item, dict):
-            if 'error' not in first_item:
-                if source_name == "duckduckgo":
-                    body = first_item.get('body', '')
-                    title = first_item.get('title', 'Web Result')
-                    if body:
-                        return f"**🌐 {title}:** {body}"
-                
-                elif source_name == "arxiv":
-                    title = first_item.get('title', 'Research Paper')
-                    summary = first_item.get('summary', '')
-                    if summary:
-                        return f"**📄 {title}:** {summary}"
-                
-                elif source_name == "news":
-                    body = first_item.get('body', '')
-                    title = first_item.get('title', 'News')
-                    if body:
-                        return f"**📰 {title}:** {body}"
-    
-    return ""
-
-def display_best_search_results(search_results: dict, working_sources: list) -> List[str]:
-    """Display the best search results and return formatted text."""
-    formatted_results = []
-    
-    # Priority order for display
-    display_order = [
-        "wikipedia",
-        "duckduckgo_instant", 
-        "duckduckgo",
-        "news",
-        "dictionary",
-        "weather",
-        "arxiv",
-        "pubmed",
-        "books"
-    ]
-    
-    for source in display_order:
-        if source in working_sources and source in search_results:
-            formatted = format_search_result(source, search_results[source])
-            if formatted:
-                formatted_results.append(formatted)
-    
-    return formatted_results
-
-# ============================================
-# STREAMLIT UI
-# ============================================
-st.markdown("""
-<style>
-    .main-header {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 2rem;
-        border-radius: 15px;
-        color: white;
-        margin-bottom: 2rem;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-    }
-    .result-card {
-        background: #f8f9fa;
-        border-left: 4px solid #4CAF50;
-        padding: 1rem;
-        border-radius: 5px;
-        margin: 0.5rem 0;
-        font-size: 0.95rem;
-    }
-    .source-badge {
-        display: inline-block;
-        background: #e3f2fd;
-        color: #1976d2;
-        padding: 0.3rem 0.8rem;
-        border-radius: 20px;
-        font-size: 0.85rem;
-        margin: 0.2rem;
-        border: 1px solid #bbdefb;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# Main header
-st.markdown("""
-<div class="main-header">
-    <h1>🔍 SmartSearch Pro</h1>
-    <h4>16-Source Search Engine | Direct Results</h4>
-</div>
-""", unsafe_allow_html=True)
-
-# Sidebar
-with st.sidebar:
-    st.header("⚙️ Settings")
-    
-    show_sources = st.toggle("Show Source Details", value=True)
-    auto_search = st.toggle("Auto-Search on Query", value=True)
-    
-    st.divider()
-    
-    st.header("🔍 Search Sources")
-    
-    st.caption("🌐 **Web Search:**")
-    st.caption("• Wikipedia • DuckDuckGo • News")
-    
-    st.caption("🔬 **Research:**")
-    st.caption("• ArXiv • PubMed • Wikidata")
-    
-    st.caption("📚 **Reference:**")
-    st.caption("• Dictionary • Books • Quotes")
-    
-    st.caption("💻 **Developer:**")
-    st.caption("• GitHub • Stack Overflow")
-    
-    st.caption("🌍 **Location:**")
-    st.caption("• Weather • Air Quality • Geocoding")
-    
-    st.divider()
-    
-    if st.button("🔄 New Search", use_container_width=True):
-        st.session_state.messages = []
-        st.session_state.search_results = {}
-        st.session_state.search_analysis = {}
-        st.rerun()
-
-# Display chat
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-        
-        # Show search metadata if available
-        if message["role"] == "assistant" and "metadata" in message:
-            metadata = message["metadata"]
-            cols = st.columns(2)
-            with cols[0]:
-                st.caption(f"📊 {metadata.get('source_count', 0)}/16 sources")
-            with cols[1]:
-                st.caption(f"⏱️ {metadata.get('search_time', '')}")
-
-# Chat input
-if prompt := st.chat_input("Search for anything..."):
+# ========== Main Chat Interface ==========
+if prompt := st.chat_input("Search anything or ask a question..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     
     with st.chat_message("user"):
         st.markdown(prompt)
     
     with st.chat_message("assistant"):
-        # Search and display results
-        with st.spinner("🔍 Searching 16 sources..."):
-            start_time = datetime.now()
-            search_results = search_all_sources(prompt)
-            search_time = (datetime.now() - start_time).total_seconds()
-            search_analysis = analyze_search_results(prompt, search_results)
+        # Create tabs for different views
+        tab1, tab2, tab3 = st.tabs(["🤖 AI Analysis", "📊 Search Results", "📈 Raw Data"])
         
-        working_sources = search_analysis.get('working_sources', [])
-        working_count = len(working_sources)
-        
-        # Display search stats
-        cols = st.columns(3)
-        with cols[0]:
-            st.metric("Sources Found", f"{working_count}/16")
-        with cols[1]:
-            confidence = search_analysis.get('confidence_score', 'low')
-            st.metric("Confidence", confidence.capitalize())
-        with cols[2]:
-            st.metric("Search Time", f"{search_time:.1f}s")
-        
-        # Get and display formatted results
-        formatted_results = display_best_search_results(search_results, working_sources)
-        
-        if formatted_results:
-            st.markdown("### 📋 Search Results:")
+        with tab1:
+            with st.spinner("🔎 Searching across 16 sources..."):
+                search_results = search_all_sources(prompt)
             
-            for result in formatted_results[:5]:  # Show top 5 results
-                st.markdown(f'<div class="result-card">{result}</div>', unsafe_allow_html=True)
-            
-            # Show sources if enabled
-            if show_sources and working_sources:
-                with st.expander("📊 View All Sources", expanded=False):
-                    cols = st.columns(4)
-                    for idx, source in enumerate(working_sources[:12]):
-                        with cols[idx % 4]:
-                            st.markdown(f'<span class="source-badge">{source}</span>', unsafe_allow_html=True)
-            
-            # Generate simple summary
-            if formatted_results:
-                first_result = formatted_results[0]
-                # Extract just the text part (after the colon)
-                if ":**" in first_result:
-                    summary_text = first_result.split(":**", 1)[1].strip()
-                    ai_response = f"**Based on search results:** {summary_text[:300]}..."
-                else:
-                    ai_response = f"**Search found information about:** {prompt}"
-            else:
-                ai_response = f"Search returned limited information about {prompt}."
+            with st.spinner("🤖 AI is analyzing search results..."):
+                # Format search results for AI
+                search_context = format_results_for_ai(prompt, search_results)
+                
+                # Generate AI response
+                ai_response = generate_ai_response(
+                    model,
+                    search_context,
+                    prompt,
+                    system_prompt=st.session_state.system_prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature
+                )
+                
+                st.markdown("### AI Analysis Based on Search Results")
+                st.markdown(ai_response)
         
-        else:
-            st.warning(f"⚠️ No clear information found from search ({working_count}/16 sources responded)")
-            ai_response = f"No specific information found about '{prompt}' in search results."
+        with tab2:
+            st.markdown("### 📊 Detailed Search Results")
+            display_results = format_results_display(prompt, search_results)
+            st.markdown(display_results)
         
-        # Store message
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": ai_response,
-            "metadata": {
-                "sources": working_sources,
-                "source_count": working_count,
-                "confidence": search_analysis.get('confidence_score', 'low'),
-                "search_time": f"{search_time:.1f}s"
-            }
-        })
+        with tab3:
+            st.markdown("### 📈 Raw Data from All Sources")
+            for source, data in search_results.items():
+                with st.expander(f"📌 {source.replace('_', ' ').title()}"):
+                    st.json(data)
         
-        # Store search data
-        st.session_state.search_results = search_results
-        st.session_state.search_analysis = search_analysis
-
-# Quick examples
-if not st.session_state.messages:
-    st.markdown("### 💡 Try searching for:")
+        # Store combined response
+        combined_response = f"## 🤖 AI Analysis\n{ai_response}\n\n---\n\n## 📊 Search Results Summary\n{display_results[:500]}..."
     
-    examples = [
-        "The dancing plague",
-        "Tulip Era Ottoman",
-        "Weather in Paris",
-        "Machine learning basics",
-        "Python programming",
-        "Climate change effects"
-    ]
-    
-    cols = st.columns(3)
-    for idx, example in enumerate(examples):
-        with cols[idx % 3]:
-            if st.button(example, use_container_width=True):
-                st.session_state.messages.append({"role": "user", "content": example})
-                st.rerun()
-
-# Footer
-st.divider()
-st.caption("SmartSearch Pro | 16-Source Search Engine | Direct Results Only")
+    st.session_state.messages.append({
+        "role": "assistant", 
+        "content": combined_response
+    })
