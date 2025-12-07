@@ -4,22 +4,9 @@ import concurrent.futures
 from datetime import datetime
 import re
 import requests
-
-# Import all your search services
-from arxiv_service import search_arxiv
-from duckduckgo_service import search_duckduckgo, get_instant_answer, search_news
-from wikipedia_service import search_wikipedia
-from weather_service import get_weather_wttr
-from openaq_service import get_air_quality
-from wikidata_service import search_wikidata
-from openlibrary_service import search_books
-from pubmed_service import search_pubmed
-from nominatim_service import geocode_location
-from dictionary_service import get_definition
-from countries_service import search_country
-from quotes_service import search_quotes
-from github_service import search_github_repos
-from stackexchange_service import search_stackoverflow
+import json
+import xml.etree.ElementTree as ET
+from typing import Dict, List, Optional, Any
 
 # ============================================
 # MODEL CONFIGURATION
@@ -29,7 +16,7 @@ MODEL_PATH = MODEL_DIR / "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
 MODEL_URL = "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
 
 # ============================================
-# AI PERSONAS (Khisba GIS focused)
+# AI PERSONAS
 # ============================================
 PRESET_PROMPTS = {
     "Khisba GIS Expert": """You are Khisba GIS - a passionate remote sensing/GIS specialist with deep analytical skills.
@@ -40,58 +27,31 @@ CORE IDENTITY:
 - Style: Enthusiastic, precise, and approachable
 - Expertise: Satellite imagery, vegetation indices, climate analysis, urban planning, disaster monitoring
 
-THINKING FRAMEWORK:
-1. **Geospatial Context**: How does location/spatial relationships matter?
-2. **Temporal Analysis**: What changes over time? Historical patterns?
-3. **Data Source Evaluation**: Satellite, ground, or derived data reliability?
-4. **Multi-Scale Thinking**: From local to global perspectives
-5. **Practical Applications**: Real-world uses of the information
-6. **Ethical Considerations**: Privacy, representation, accessibility issues
-
 RESPONSE STYLE:
-- Start with a warm greeting if it's the first response
 - Reference search findings when available
 - Provide concrete examples from GIS/remote sensing
 - Use clear, professional language with occasional enthusiasm
-- End with actionable insights or suggestions
-
-SPECIALTY AREAS:
-- NDVI/EVI analysis
-- Land cover classification
-- Climate change monitoring
-- Urban heat island studies
-- Disaster risk assessment""",
+- End with actionable insights or suggestions""",
 
     "Deep Thinker Pro": """You are a sophisticated AI thinker that excels at analysis, synthesis, and providing insightful perspectives.
 
 THINKING FRAMEWORK:
-1. **Comprehension**: Understand the query fully, identify key elements
-2. **Contextualization**: Place the topic in historical, cultural, or disciplinary context
-3. **Multi-Source Analysis**: Examine information from different sources critically
-4. **Pattern Recognition**: Identify connections, contradictions, gaps
-5. **Synthesis**: Combine insights into coherent understanding
-6. **Critical Evaluation**: Assess reliability, bias, significance
-7. **Insight Generation**: Provide original perspectives or connections
-
-RESPONSE STRUCTURE:
-- Start with brief overview
-- Present analysis with reasoning
-- Reference sources when available
-- Highlight interesting connections
-- Acknowledge uncertainties
-- End with thought-provoking questions or suggestions""",
+1. **Comprehension**: Understand the query fully
+2. **Contextualization**: Place topic in historical/cultural context
+3. **Multi-Source Analysis**: Examine information critically
+4. **Pattern Recognition**: Identify connections and gaps
+5. **Synthesis**: Combine insights coherently
+6. **Critical Evaluation**: Assess reliability and significance""",
 
     "Research Analyst": """You are a professional research analyst specializing in synthesizing complex information.
 
 ANALYTICAL APPROACH:
-1. **Source Triangulation**: Cross-reference multiple information sources
-2. **Credibility Assessment**: Evaluate source reliability, date, bias
-3. **Trend Identification**: Spot patterns, changes, anomalies
+1. **Source Triangulation**: Cross-reference multiple sources
+2. **Credibility Assessment**: Evaluate source reliability
+3. **Trend Identification**: Spot patterns and anomalies
 4. **Comparative Analysis**: Similarities/differences across contexts
-5. **Implication Mapping**: Consequences, applications, risks
-6. **Knowledge Gaps**: What's missing or needs verification
-
-Always provide structured, evidence-based analysis with clear reasoning.""",
+5. **Implication Mapping**: Consequences and applications
+6. **Knowledge Gaps**: Identify what's missing""",
 
     "Technical Expert": """You are a technical expert with deep knowledge across multiple domains.
 
@@ -104,54 +64,642 @@ EXPERTISE AREAS:
 
 RESPONSE APPROACH:
 - Provide clear, accurate technical information
-- Include code examples when relevant
+- Include examples when relevant
 - Explain complex concepts simply
-- Reference best practices and standards
-- Suggest further reading or resources""",
+- Reference best practices and standards""",
 
     "Creative Synthesizer": """You connect seemingly unrelated ideas to generate novel insights.
 
 CREATIVE PROCESS:
-1. **Divergent Thinking**: Generate multiple possible interpretations
-2. **Analogical Reasoning**: What similar patterns exist elsewhere?
-3. **Metaphorical Connection**: What metaphors illuminate this?
+1. **Divergent Thinking**: Generate multiple interpretations
+2. **Analogical Reasoning**: Find similar patterns elsewhere
+3. **Metaphorical Connection**: Use metaphors for illumination
 4. **Interdisciplinary Bridging**: Connect across fields
-5. **Future Projection**: How might this evolve or transform?
-6. **Alternative Framing**: Different ways to conceptualize
-
-Be imaginative while staying grounded in evidence."""
+5. **Future Projection**: Explore evolution possibilities
+6. **Alternative Framing**: Different conceptualizations"""
 }
 
-st.set_page_config(
-    page_title="SmartSearch AI Pro",
-    page_icon="🔍🧠",
-    layout="wide"
-)
+# ============================================
+# SEARCH SERVICE FUNCTIONS (All included directly)
+# ============================================
 
-# Initialize session state
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+# 1. ArXiv Search
+def search_arxiv(query: str, max_results: int = 3) -> List[Dict]:
+    """Search ArXiv for scientific papers."""
+    try:
+        url = "http://export.arxiv.org/api/query"
+        params = {
+            'search_query': f'all:{query}',
+            'start': 0,
+            'max_results': max_results,
+            'sortBy': 'relevance'
+        }
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        
+        root = ET.fromstring(response.content)
+        papers = []
+        
+        for entry in root.findall('{http://www.w3.org/2005/Atom}entry'):
+            title_elem = entry.find('{http://www.w3.org/2005/Atom}title')
+            summary_elem = entry.find('{http://www.w3.org/2005/Atom}summary')
+            
+            if title_elem is not None and title_elem.text and summary_elem is not None and summary_elem.text:
+                title = title_elem.text.strip().replace('\n', ' ')
+                summary = summary_elem.text.strip().replace('\n', ' ')
+                
+                # Extract authors
+                authors = []
+                for author in entry.findall('{http://www.w3.org/2005/Atom}author'):
+                    name_elem = author.find('{http://www.w3.org/2005/Atom}name')
+                    if name_elem is not None and name_elem.text:
+                        authors.append(name_elem.text.strip())
+                
+                # Extract published date
+                published_elem = entry.find('{http://www.w3.org/2005/Atom}published')
+                published = published_elem.text[:10] if published_elem is not None and published_elem.text else ''
+                
+                # Extract link
+                link = ''
+                for link_elem in entry.findall('{http://www.w3.org/2005/Atom}link'):
+                    if link_elem.get('title') == 'pdf':
+                        link = link_elem.get('href', '')
+                        break
+                
+                papers.append({
+                    'title': title,
+                    'summary': summary[:300] + '...' if len(summary) > 300 else summary,
+                    'authors': authors[:3],
+                    'published': published,
+                    'url': link,
+                    'source': 'arxiv'
+                })
+        
+        return papers[:max_results]
+    except Exception as e:
+        return [{'error': f"ArXiv search failed: {str(e)}"}]
 
-if "search_results" not in st.session_state:
-    st.session_state.search_results = {}
+# 2. DuckDuckGo Search
+def search_duckduckgo(query: str, max_results: int = 5) -> List[Dict]:
+    """Search DuckDuckGo for web results."""
+    try:
+        url = "https://api.duckduckgo.com/"
+        params = {
+            'q': query,
+            'format': 'json',
+            'no_html': 1,
+            'skip_disambig': 1
+        }
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        results = []
+        
+        # Add instant answer if available
+        if data.get('AbstractText'):
+            results.append({
+                'title': 'Instant Answer',
+                'body': data['AbstractText'],
+                'url': data.get('AbstractURL', ''),
+                'source': 'duckduckgo'
+            })
+        
+        # Add related topics
+        for topic in data.get('RelatedTopics', [])[:max_results-1]:
+            if isinstance(topic, dict) and topic.get('Text') and topic.get('FirstURL'):
+                results.append({
+                    'title': topic.get('Text', '')[:100],
+                    'body': '',
+                    'url': topic.get('FirstURL', ''),
+                    'source': 'duckduckgo'
+                })
+        
+        return results[:max_results]
+    except Exception as e:
+        return [{'error': f"DuckDuckGo search failed: {str(e)}"}]
 
-if "search_analysis" not in st.session_state:
-    st.session_state.search_analysis = {}
+# 3. DuckDuckGo Instant Answer
+def get_instant_answer(query: str) -> Dict:
+    """Get instant answer from DuckDuckGo."""
+    try:
+        url = "https://api.duckduckgo.com/"
+        params = {
+            'q': query,
+            'format': 'json',
+            'no_html': 1
+        }
+        response = requests.get(url, params=params, timeout=8)
+        response.raise_for_status()
+        data = response.json()
+        
+        result = {}
+        if data.get('Answer'):
+            result['answer'] = data['Answer']
+        if data.get('AbstractText'):
+            result['abstract'] = data['AbstractText']
+        if data.get('Definition'):
+            result['definition'] = data['Definition']
+        if data.get('Redirect'):
+            result['redirect'] = data['Redirect']
+        
+        return result if result else {'error': 'No instant answer found'}
+    except Exception as e:
+        return {'error': f"Instant answer failed: {str(e)}"}
 
-if "model" not in st.session_state:
-    st.session_state.model = None
+# 4. Wikipedia Search
+def search_wikipedia(query: str) -> Dict:
+    """Search Wikipedia for articles."""
+    try:
+        # First, search for pages
+        search_url = "https://en.wikipedia.org/w/api.php"
+        params = {
+            'action': 'query',
+            'format': 'json',
+            'list': 'search',
+            'srsearch': query,
+            'srlimit': 1
+        }
+        response = requests.get(search_url, params=params, timeout=8)
+        response.raise_for_status()
+        data = response.json()
+        
+        if not data.get('query', {}).get('search'):
+            return {'error': 'No Wikipedia article found'}
+        
+        page_id = data['query']['search'][0]['pageid']
+        title = data['query']['search'][0]['title']
+        
+        # Get page content
+        params = {
+            'action': 'query',
+            'format': 'json',
+            'prop': 'extracts|info',
+            'inprop': 'url',
+            'exintro': 1,
+            'explaintext': 1,
+            'pageids': page_id
+        }
+        response = requests.get(search_url, params=params, timeout=8)
+        response.raise_for_status()
+        data = response.json()
+        
+        pages = data.get('query', {}).get('pages', {})
+        if not pages:
+            return {'error': 'Could not fetch Wikipedia content'}
+        
+        page = pages.get(str(page_id), {})
+        
+        return {
+            'exists': True,
+            'title': page.get('title', title),
+            'summary': page.get('extract', '')[:500],
+            'url': page.get('fullurl', f'https://en.wikipedia.org/wiki/{title.replace(" ", "_")}'),
+            'source': 'wikipedia'
+        }
+    except Exception as e:
+        return {'error': f"Wikipedia search failed: {str(e)}"}
 
-if "system_prompt" not in st.session_state:
-    st.session_state.system_prompt = PRESET_PROMPTS["Khisba GIS Expert"]
+# 5. Weather Search
+def get_weather_wttr(query: str) -> Dict:
+    """Get weather information from wttr.in."""
+    try:
+        url = f"https://wttr.in/{requests.utils.quote(query)}?format=j1"
+        response = requests.get(url, timeout=8)
+        response.raise_for_status()
+        data = response.json()
+        
+        current = data.get('current_condition', [{}])[0]
+        location = data.get('nearest_area', [{}])[0]
+        
+        return {
+            'location': location.get('areaName', [{}])[0].get('value', query),
+            'temperature_c': current.get('temp_C', 'N/A'),
+            'temperature_f': current.get('temp_F', 'N/A'),
+            'condition': current.get('weatherDesc', [{}])[0].get('value', 'N/A'),
+            'humidity': current.get('humidity', 'N/A'),
+            'wind_speed': current.get('windspeedKmph', 'N/A'),
+            'source': 'weather'
+        }
+    except Exception as e:
+        return {'error': f"Weather search failed: {str(e)}"}
 
-if "selected_preset" not in st.session_state:
-    st.session_state.selected_preset = "Khisba GIS Expert"
+# 6. Air Quality Search
+def get_air_quality(query: str) -> Dict:
+    """Get air quality information from OpenAQ."""
+    try:
+        url = f"https://api.openaq.org/v2/latest"
+        params = {
+            'limit': 3,
+            'city': query
+        }
+        response = requests.get(url, params=params, timeout=8)
+        response.raise_for_status()
+        data = response.json()
+        
+        if not data.get('results'):
+            return {'error': 'No air quality data found'}
+        
+        locations = []
+        for result in data['results'][:2]:
+            measurements = []
+            for param in result.get('measurements', [])[:3]:
+                measurements.append({
+                    'parameter': param.get('parameter', ''),
+                    'value': param.get('value', ''),
+                    'unit': param.get('unit', '')
+                })
+            
+            locations.append({
+                'location': result.get('location', ''),
+                'city': result.get('city', query),
+                'country': result.get('country', ''),
+                'measurements': measurements
+            })
+        
+        return {
+            'city': query,
+            'data': locations,
+            'source': 'air_quality'
+        }
+    except Exception as e:
+        return {'error': f"Air quality search failed: {str(e)}"}
+
+# 7. Wikidata Search
+def search_wikidata(query: str, max_results: int = 3) -> List[Dict]:
+    """Search Wikidata for entities."""
+    try:
+        url = "https://www.wikidata.org/w/api.php"
+        params = {
+            'action': 'wbsearchentities',
+            'format': 'json',
+            'language': 'en',
+            'search': query,
+            'limit': max_results
+        }
+        response = requests.get(url, params=params, timeout=8)
+        response.raise_for_status()
+        data = response.json()
+        
+        entities = []
+        for entity in data.get('search', [])[:max_results]:
+            entities.append({
+                'label': entity.get('label', ''),
+                'description': entity.get('description', ''),
+                'id': entity.get('id', ''),
+                'url': f"https://www.wikidata.org/wiki/{entity.get('id', '')}",
+                'source': 'wikidata'
+            })
+        
+        return entities
+    except Exception as e:
+        return [{'error': f"Wikidata search failed: {str(e)}"}]
+
+# 8. OpenLibrary Books Search
+def search_books(query: str, max_results: int = 5) -> List[Dict]:
+    """Search OpenLibrary for books."""
+    try:
+        url = "https://openlibrary.org/search.json"
+        params = {
+            'q': query,
+            'limit': max_results
+        }
+        response = requests.get(url, params=params, timeout=8)
+        response.raise_for_status()
+        data = response.json()
+        
+        books = []
+        for doc in data.get('docs', [])[:max_results]:
+            authors = doc.get('author_name', [])
+            if isinstance(authors, list):
+                authors = authors[:2]
+            
+            books.append({
+                'title': doc.get('title', ''),
+                'authors': authors,
+                'first_publish_year': doc.get('first_publish_year', ''),
+                'publisher': doc.get('publisher', [])[0] if doc.get('publisher') else '',
+                'url': f"https://openlibrary.org{doc.get('key', '')}",
+                'source': 'books'
+            })
+        
+        return books
+    except Exception as e:
+        return [{'error': f"Books search failed: {str(e)}"}]
+
+# 9. PubMed Search
+def search_pubmed(query: str, max_results: int = 3) -> List[Dict]:
+    """Search PubMed for medical articles."""
+    try:
+        url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+        params = {
+            'db': 'pubmed',
+            'term': query,
+            'retmode': 'json',
+            'retmax': max_results
+        }
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        ids = data.get('esearchresult', {}).get('idlist', [])
+        if not ids:
+            return [{'error': 'No PubMed articles found'}]
+        
+        # Get details for each article
+        details_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+        params = {
+            'db': 'pubmed',
+            'id': ','.join(ids),
+            'retmode': 'json'
+        }
+        response = requests.get(details_url, params=params, timeout=10)
+        response.raise_for_status()
+        details = response.json()
+        
+        articles = []
+        for article_id in ids[:max_results]:
+            article_data = details.get('result', {}).get(article_id, {})
+            authors = []
+            for author in article_data.get('authors', [])[:2]:
+                if isinstance(author, dict):
+                    authors.append(author.get('name', ''))
+            
+            articles.append({
+                'title': article_data.get('title', ''),
+                'authors': authors,
+                'year': article_data.get('pubdate', '')[:4],
+                'journal': article_data.get('source', ''),
+                'url': f"https://pubmed.ncbi.nlm.nih.gov/{article_id}/",
+                'source': 'pubmed'
+            })
+        
+        return articles
+    except Exception as e:
+        return [{'error': f"PubMed search failed: {str(e)}"}]
+
+# 10. Geocoding (Nominatim)
+def geocode_location(query: str) -> Dict:
+    """Geocode location using Nominatim."""
+    try:
+        url = "https://nominatim.openstreetmap.org/search"
+        params = {
+            'q': query,
+            'format': 'json',
+            'limit': 1
+        }
+        headers = {
+            'User-Agent': 'SmartSearchAI/1.0'
+        }
+        response = requests.get(url, params=params, headers=headers, timeout=8)
+        response.raise_for_status()
+        data = response.json()
+        
+        if not data:
+            return {'error': 'Location not found'}
+        
+        location = data[0]
+        return {
+            'display_name': location.get('display_name', ''),
+            'latitude': location.get('lat', ''),
+            'longitude': location.get('lon', ''),
+            'osm_url': f"https://www.openstreetmap.org/?mlat={location.get('lat')}&mlon={location.get('lon')}",
+            'source': 'geocoding'
+        }
+    except Exception as e:
+        return {'error': f"Geocoding failed: {str(e)}"}
+
+# 11. Dictionary Definition
+def get_definition(word: str) -> Dict:
+    """Get dictionary definition."""
+    try:
+        url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{word}"
+        response = requests.get(url, timeout=8)
+        
+        if response.status_code == 404:
+            return {'error': 'Word not found in dictionary'}
+        
+        response.raise_for_status()
+        data = response.json()
+        
+        if not data or not isinstance(data, list):
+            return {'error': 'Invalid dictionary response'}
+        
+        entry = data[0]
+        meanings = []
+        
+        for meaning in entry.get('meanings', [])[:2]:
+            definitions = []
+            for definition in meaning.get('definitions', [])[:2]:
+                definitions.append({
+                    'definition': definition.get('definition', ''),
+                    'example': definition.get('example', '')
+                })
+            
+            meanings.append({
+                'part_of_speech': meaning.get('partOfSpeech', ''),
+                'definitions': definitions
+            })
+        
+        phonetics = []
+        for phonetic in entry.get('phonetics', []):
+            if phonetic.get('text'):
+                phonetics.append(phonetic['text'])
+        
+        return {
+            'word': entry.get('word', word),
+            'phonetics': phonetics[:3],
+            'meanings': meanings,
+            'source': 'dictionary'
+        }
+    except Exception as e:
+        return {'error': f"Dictionary search failed: {str(e)}"}
+
+# 12. Country Information
+def search_country(query: str) -> Dict:
+    """Search for country information."""
+    try:
+        url = f"https://restcountries.com/v3.1/name/{query}"
+        response = requests.get(url, timeout=8)
+        
+        if response.status_code == 404:
+            return {'error': 'Country not found'}
+        
+        response.raise_for_status()
+        data = response.json()
+        
+        if not data:
+            return {'error': 'No country data found'}
+        
+        country = data[0]
+        
+        # Get languages
+        languages = []
+        if country.get('languages'):
+            languages = list(country['languages'].values())[:3]
+        
+        # Get currencies
+        currencies = []
+        if country.get('currencies'):
+            for currency_code, currency_info in country['currencies'].items():
+                currencies.append(f"{currency_info.get('name', '')} ({currency_code})")
+        
+        return {
+            'name': country.get('name', {}).get('common', query),
+            'official_name': country.get('name', {}).get('official', ''),
+            'capital': country.get('capital', [''])[0],
+            'region': country.get('region', ''),
+            'subregion': country.get('subregion', ''),
+            'population': country.get('population', 0),
+            'languages': languages,
+            'currencies': currencies[:2],
+            'flag_emoji': country.get('flag', ''),
+            'map_url': f"https://www.google.com/maps?q={country.get('latlng', [0,0])[0]},{country.get('latlng', [0,0])[1]}",
+            'source': 'country'
+        }
+    except Exception as e:
+        return {'error': f"Country search failed: {str(e)}"}
+
+# 13. Quotes Search
+def search_quotes(query: str, max_results: int = 3) -> List[Dict]:
+    """Search for quotes."""
+    try:
+        url = "https://api.quotable.io/search/quotes"
+        params = {
+            'query': query,
+            'limit': max_results
+        }
+        response = requests.get(url, params=params, timeout=8)
+        response.raise_for_status()
+        data = response.json()
+        
+        quotes = []
+        for quote in data.get('results', [])[:max_results]:
+            quotes.append({
+                'content': quote.get('content', ''),
+                'author': quote.get('author', 'Unknown'),
+                'tags': quote.get('tags', [])[:3],
+                'source': 'quotes'
+            })
+        
+        return quotes
+    except Exception as e:
+        return [{'error': f"Quotes search failed: {str(e)}"}]
+
+# 14. GitHub Repositories Search
+def search_github_repos(query: str, max_results: int = 3) -> List[Dict]:
+    """Search GitHub for repositories."""
+    try:
+        url = "https://api.github.com/search/repositories"
+        params = {
+            'q': query,
+            'sort': 'stars',
+            'order': 'desc',
+            'per_page': max_results
+        }
+        headers = {
+            'Accept': 'application/vnd.github.v3+json'
+        }
+        response = requests.get(url, params=params, headers=headers, timeout=8)
+        response.raise_for_status()
+        data = response.json()
+        
+        repos = []
+        for repo in data.get('items', [])[:max_results]:
+            repos.append({
+                'name': repo.get('name', ''),
+                'full_name': repo.get('full_name', ''),
+                'description': repo.get('description', '')[:150],
+                'language': repo.get('language', ''),
+                'stars': repo.get('stargazers_count', 0),
+                'forks': repo.get('forks_count', 0),
+                'url': repo.get('html_url', ''),
+                'source': 'github'
+            })
+        
+        return repos
+    except Exception as e:
+        return [{'error': f"GitHub search failed: {str(e)}"}]
+
+# 15. Stack Overflow Search
+def search_stackoverflow(query: str, max_results: int = 3) -> List[Dict]:
+    """Search Stack Overflow for questions."""
+    try:
+        url = "https://api.stackexchange.com/2.3/search"
+        params = {
+            'order': 'desc',
+            'sort': 'relevance',
+            'intitle': query,
+            'site': 'stackoverflow',
+            'pagesize': max_results
+        }
+        response = requests.get(url, params=params, timeout=8)
+        response.raise_for_status()
+        data = response.json()
+        
+        questions = []
+        for question in data.get('items', [])[:max_results]:
+            questions.append({
+                'title': question.get('title', ''),
+                'is_answered': question.get('is_answered', False),
+                'score': question.get('score', 0),
+                'answer_count': question.get('answer_count', 0),
+                'view_count': question.get('view_count', 0),
+                'tags': question.get('tags', [])[:3],
+                'url': question.get('link', ''),
+                'source': 'stackoverflow'
+            })
+        
+        return questions
+    except Exception as e:
+        return [{'error': f"Stack Overflow search failed: {str(e)}"}]
+
+# 16. News Search (using DuckDuckGo news)
+def search_news(query: str, max_results: int = 3) -> List[Dict]:
+    """Search for news articles."""
+    try:
+        url = "https://api.duckduckgo.com/"
+        params = {
+            'q': query,
+            'format': 'json',
+            'no_html': 1
+        }
+        response = requests.get(url, params=params, timeout=8)
+        response.raise_for_status()
+        data = response.json()
+        
+        news_items = []
+        
+        # Check for news in the response
+        if data.get('AbstractText') and 'news' in query.lower():
+            news_items.append({
+                'title': 'Latest News',
+                'body': data['AbstractText'][:200],
+                'url': data.get('AbstractURL', ''),
+                'source': 'news',
+                'date': datetime.now().strftime('%Y-%m-%d')
+            })
+        
+        # Add related topics as news-like items
+        for topic in data.get('RelatedTopics', [])[:max_results]:
+            if isinstance(topic, dict) and topic.get('Text'):
+                news_items.append({
+                    'title': topic.get('Text', '')[:100],
+                    'body': '',
+                    'url': topic.get('FirstURL', ''),
+                    'source': 'news',
+                    'date': datetime.now().strftime('%Y-%m-%d')
+                })
+        
+        return news_items[:max_results]
+    except Exception as e:
+        return [{'error': f"News search failed: {str(e)}"}]
 
 # ============================================
-# INDEPENDENT 16-SOURCE SEARCH (YOUR EXISTING CODE)
+# MAIN SEARCH FUNCTION
 # ============================================
 def search_all_sources(query: str) -> dict:
-    """Search ALL 16 sources simultaneously - INDEPENDENT of AI."""
+    """Search ALL 16 sources simultaneously."""
     results = {}
     
     def safe_search(name, func, *args, **kwargs):
@@ -162,6 +710,7 @@ def search_all_sources(query: str) -> dict:
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
         first_word = query.split()[0] if query.strip() else query
+        
         futures = {
             executor.submit(safe_search, "arxiv", search_arxiv, query, 3): "arxiv",
             executor.submit(safe_search, "duckduckgo", search_duckduckgo, query, 5): "duckduckgo",
@@ -191,107 +740,101 @@ def search_all_sources(query: str) -> dict:
     return results
 
 def analyze_search_results(query: str, results: dict) -> dict:
-    """Analyze search results independently - creates summary for AI."""
+    """Analyze search results independently."""
     analysis = {
         'key_facts': [],
         'source_count': len(results),
         'working_sources': [],
         'failed_sources': [],
-        'data_types': {},
         'confidence_score': 0,
         'knowledge_gaps': []
     }
     
-    # Categorize results
+    # Check each source
     for source, data in results.items():
-        if isinstance(data, dict) and "error" not in data:
+        # Check if source has valid data (not an error)
+        has_data = False
+        
+        if isinstance(data, dict):
+            has_data = "error" not in data and data.get("error") is None
+        elif isinstance(data, list):
+            has_data = len(data) > 0 and not ("error" in str(data[0]) if data else False)
+        
+        if has_data:
             analysis['working_sources'].append(source)
             
-            # Extract key facts based on source type
-            if source == "duckduckgo_instant" and data.get("answer"):
+            # Extract key facts based on source
+            if source == "duckduckgo_instant" and isinstance(data, dict) and data.get("answer"):
                 analysis['key_facts'].append({
-                    'content': data['answer'][:200],
-                    'source': 'DuckDuckGo',
-                    'type': 'instant_answer'
+                    'content': data['answer'][:150],
+                    'source': 'DuckDuckGo Instant'
                 })
             
-            elif source == "wikipedia" and data.get("summary"):
+            elif source == "wikipedia" and isinstance(data, dict) and data.get("summary"):
                 analysis['key_facts'].append({
-                    'content': data['summary'][:200],
-                    'source': 'Wikipedia',
-                    'type': 'encyclopedia'
+                    'content': data['summary'][:150],
+                    'source': 'Wikipedia'
                 })
             
-            elif source == "dictionary" and data.get("meanings"):
-                for meaning in data['meanings'][:1]:
-                    for definition in meaning.get('definitions', [])[:1]:
-                        analysis['key_facts'].append({
-                            'content': definition.get('definition', '')[:150],
-                            'source': 'Dictionary',
-                            'type': 'definition'
-                        })
-            
-            elif source == "country" and data.get("name"):
+            elif source == "dictionary" and isinstance(data, dict) and data.get("meanings"):
                 analysis['key_facts'].append({
-                    'content': f"Country: {data.get('name', '')}",
-                    'source': 'Country API',
-                    'type': 'geography'
+                    'content': f"Word definition found for {data.get('word', 'word')}",
+                    'source': 'Dictionary'
                 })
-        
-        elif isinstance(data, list) and data and "error" not in data[0]:
-            analysis['working_sources'].append(source)
-            
-            # Extract from lists
-            if source == "arxiv" and data:
-                for paper in data[:1]:
-                    analysis['key_facts'].append({
-                        'content': f"Research: {paper.get('title', '')[:100]}",
-                        'source': 'ArXiv',
-                        'type': 'scientific'
-                    })
-            
-            elif source == "pubmed" and data:
-                for article in data[:1]:
-                    analysis['key_facts'].append({
-                        'content': f"Medical: {article.get('title', '')[:100]}",
-                        'source': 'PubMed',
-                        'type': 'medical'
-                    })
-            
-            elif source == "books" and data:
-                for book in data[:1]:
-                    analysis['key_facts'].append({
-                        'content': f"Book: {book.get('title', '')[:100]}",
-                        'source': 'OpenLibrary',
-                        'type': 'literature'
-                    })
-        
         else:
             analysis['failed_sources'].append(source)
     
     # Calculate confidence
     working_count = len(analysis['working_sources'])
-    total_sources = len(results)
-    
-    if working_count >= 8:
+    if working_count >= 10:
         analysis['confidence_score'] = 'high'
-    elif working_count >= 4:
+    elif working_count >= 6:
         analysis['confidence_score'] = 'medium'
     else:
         analysis['confidence_score'] = 'low'
     
-    # Count data types
-    for fact in analysis['key_facts']:
-        data_type = fact.get('type', 'unknown')
-        analysis['data_types'][data_type] = analysis['data_types'].get(data_type, 0) + 1
+    # Identify knowledge gaps
+    if working_count < 5:
+        analysis['knowledge_gaps'].append(f"Only {working_count}/16 sources returned data")
+    
+    if not analysis['key_facts']:
+        analysis['knowledge_gaps'].append("No key facts extracted from search results")
     
     return analysis
 
 # ============================================
-# MODEL LOADING (TinyLLaMA)
+# STREAMLIT APP SETUP
+# ============================================
+st.set_page_config(
+    page_title="SmartSearch AI Pro",
+    page_icon="🔍🧠",
+    layout="wide"
+)
+
+# Initialize session state
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "search_results" not in st.session_state:
+    st.session_state.search_results = {}
+
+if "search_analysis" not in st.session_state:
+    st.session_state.search_analysis = {}
+
+if "model" not in st.session_state:
+    st.session_state.model = None
+
+if "system_prompt" not in st.session_state:
+    st.session_state.system_prompt = PRESET_PROMPTS["Khisba GIS Expert"]
+
+if "selected_preset" not in st.session_state:
+    st.session_state.selected_preset = "Khisba GIS Expert"
+
+# ============================================
+# MODEL LOADING FUNCTION
 # ============================================
 def download_model():
-    """Download the model from Hugging Face."""
+    """Download the TinyLLaMA model."""
     MODEL_DIR.mkdir(exist_ok=True)
     
     try:
@@ -319,119 +862,89 @@ def download_model():
         return True
         
     except Exception as e:
-        st.error(f"Download failed: {str(e)}")
         return False
 
 @st.cache_resource(show_spinner=False)
 def load_ai_model():
     """Load the TinyLLaMA model."""
-    from ctransformers import AutoModelForCausalLM
+    try:
+        from ctransformers import AutoModelForCausalLM
+    except ImportError:
+        st.error("Please install ctransformers: pip install ctransformers")
+        return None
     
     if not MODEL_PATH.exists():
         if not download_model():
-            raise Exception("Model download failed")
+            st.error("Model download failed. Please check your internet connection.")
+            return None
     
-    return AutoModelForCausalLM.from_pretrained(
-        str(MODEL_DIR),
-        model_file=MODEL_PATH.name,
-        model_type="llama",
-        context_length=4096,
-        gpu_layers=0,
-        threads=8
-    )
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            str(MODEL_DIR),
+            model_file=MODEL_PATH.name,
+            model_type="llama",
+            context_length=2048,
+            gpu_layers=0,
+            threads=8
+        )
+        return model
+    except Exception as e:
+        st.error(f"Failed to load model: {str(e)}")
+        return None
 
 # ============================================
-# AI SYNTHESIS ENGINE
+# AI SYNTHESIS FUNCTIONS
 # ============================================
 def create_synthesis_prompt(query: str, conversation_history: list, system_prompt: str, 
                            search_results: dict, search_analysis: dict) -> str:
-    """
-    Create a prompt that asks the AI to synthesize 16-source search results.
-    The AI receives pre-gathered search results as input.
-    """
-    # Format search summary for AI
-    search_summary = "SEARCH RESULTS SUMMARY (16 Sources):\n\n"
+    """Create prompt for AI to synthesize search results."""
     
-    if search_results:
-        search_summary += f"✅ Sources successfully queried: {search_analysis.get('working_sources', [])}\n"
-        search_summary += f"📊 Working sources: {len(search_analysis.get('working_sources', []))}/16\n"
-        search_summary += f"🎯 Confidence level: {search_analysis.get('confidence_score', 'unknown')}\n\n"
-        
-        # Add key facts
-        if search_analysis.get('key_facts'):
-            search_summary += "KEY FACTS EXTRACTED:\n"
-            for idx, fact in enumerate(search_analysis['key_facts'][:5], 1):
-                search_summary += f"{idx}. [{fact.get('source', 'Unknown')}] {fact.get('content', '')}\n"
-            search_summary += "\n"
-        
-        # Add source highlights
-        search_summary += "SOURCE HIGHLIGHTS:\n"
-        
-        # Check for instant answer
-        if "duckduckgo_instant" in search_results:
-            instant = search_results["duckduckgo_instant"]
-            if isinstance(instant, dict) and instant.get("answer"):
-                search_summary += f"• Instant Answer: {instant['answer'][:150]}\n"
-        
-        # Check for Wikipedia
-        if "wikipedia" in search_results:
-            wiki = search_results["wikipedia"]
-            if isinstance(wiki, dict) and wiki.get("summary"):
-                search_summary += f"• Wikipedia Summary: {wiki['summary'][:200]}...\n"
-        
-        # Check for dictionary
-        if "dictionary" in search_results:
-            dict_data = search_results["dictionary"]
-            if isinstance(dict_data, dict) and dict_data.get("meanings"):
-                search_summary += "• Dictionary definition available\n"
-        
-        # Check for news
-        if "news" in search_results and isinstance(search_results["news"], list):
-            search_summary += f"• News articles found: {len(search_results['news'])}\n"
-        
-        # Check for research papers
-        if "arxiv" in search_results and isinstance(search_results["arxiv"], list):
-            search_summary += f"• Scientific papers found: {len(search_results['arxiv'])}\n"
-        
+    # Format search summary
+    search_summary = "SEARCH RESULTS SUMMARY:\n\n"
+    
+    working_sources = search_analysis.get('working_sources', [])
+    failed_sources = search_analysis.get('failed_sources', [])
+    
+    search_summary += f"✅ Working sources ({len(working_sources)}): {', '.join(working_sources[:8])}\n"
+    search_summary += f"⚠️ Failed sources ({len(failed_sources)}): {', '.join(failed_sources[:8])}\n"
+    search_summary += f"🎯 Confidence: {search_analysis.get('confidence_score', 'unknown')}\n\n"
+    
+    # Add key findings
+    if search_analysis.get('key_facts'):
+        search_summary += "KEY FINDINGS:\n"
+        for idx, fact in enumerate(search_analysis['key_facts'][:5], 1):
+            search_summary += f"{idx}. {fact['content']} [{fact['source']}]\n"
         search_summary += "\n"
     
-    else:
-        search_summary = "⚠️ No search results available. Please rely on your own knowledge.\n\n"
-    
-    # Format conversation history
+    # Add conversation history
     history = ""
-    for msg in conversation_history[-3:]:
-        role = "Human" if msg["role"] == "user" else "Assistant"
+    for msg in conversation_history[-2:]:
+        role = "User" if msg["role"] == "user" else "Assistant"
         history += f"{role}: {msg['content']}\n"
     
-    # Final prompt for AI
+    # Create final prompt
     prompt = f"""<|system|>
 {system_prompt}
 
-CURRENT DATE: {datetime.now().strftime('%B %d, %Y')}
-
 INSTRUCTIONS:
-1. You are provided with search results from 16 different sources
-2. Synthesize this information into a coherent, thoughtful response
-3. Reference the most relevant findings from the search results
-4. Acknowledge any limitations or uncertainties in the information
-5. Provide additional insights based on your expertise
-6. Structure your response logically
-7. End with suggestions for further exploration if appropriate
+1. You have search results from {len(working_sources)} sources
+2. Synthesize this information into a thoughtful response
+3. Reference the search results where relevant
+4. Be clear about what information comes from search vs your knowledge
+5. Structure your response logically
+6. End with insights or suggestions
 
 {search_summary}
 </s>
 
 <|user|>
-Based on the search results above from 16 sources, please respond to:
+Based on the search results above, please respond to:
 
 "{query}"
 
-Please synthesize the information and provide a comprehensive analysis. 
-If certain types of information are missing, acknowledge that.
-If there are conflicting information sources, note that.
+Please synthesize the available information and provide a comprehensive analysis.
 
-Conversation History:
+Previous conversation:
 {history}</s>
 
 <|assistant|>
@@ -440,7 +953,7 @@ Conversation History:
     return prompt
 
 def generate_ai_response(model, prompt: str, max_tokens: int = 768, temperature: float = 0.7) -> str:
-    """Generate AI response using the loaded model."""
+    """Generate AI response."""
     try:
         response = model(
             prompt,
@@ -448,21 +961,12 @@ def generate_ai_response(model, prompt: str, max_tokens: int = 768, temperature:
             temperature=temperature,
             top_p=0.9,
             repetition_penalty=1.1,
-            stop=["</s>", "<|user|>", "\n\nUser:", "### END"]
+            stop=["</s>", "<|user|>", "\n\nUser:"]
         )
         
-        # Clean up response
-        response = response.strip()
-        
-        # Ensure completeness
-        if response and not response.endswith(('.', '!', '?')):
-            if len(response.split()) > 50:  # If it's a substantial response
-                response += "..."
-        
-        return response
-        
+        return response.strip()
     except Exception as e:
-        return f"I apologize, but I encountered an error while processing your request. Please try again. Error: {str(e)}"
+        return f"I apologize, but I encountered an error: {str(e)}"
 
 # ============================================
 # STREAMLIT UI
@@ -470,18 +974,12 @@ def generate_ai_response(model, prompt: str, max_tokens: int = 768, temperature:
 st.markdown("""
 <style>
     .main-header {
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         padding: 2rem;
-        border-radius: 10px;
+        border-radius: 15px;
         color: white;
         margin-bottom: 2rem;
-    }
-    .search-card {
-        background: #f8f9fa;
-        padding: 1.5rem;
-        border-radius: 10px;
-        border-left: 5px solid #667eea;
-        margin: 1rem 0;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
     }
     .source-badge {
         display: inline-block;
@@ -493,13 +991,6 @@ st.markdown("""
         margin: 0.2rem;
         border: 1px solid #bbdefb;
     }
-    .ai-response-box {
-        background: #fffde7;
-        padding: 1.5rem;
-        border-radius: 10px;
-        border: 2px solid #ffd54f;
-        margin: 1rem 0;
-    }
     .confidence-high { background: #d4edda !important; color: #155724 !important; }
     .confidence-medium { background: #fff3cd !important; color: #856404 !important; }
     .confidence-low { background: #f8d7da !important; color: #721c24 !important; }
@@ -510,7 +1001,7 @@ st.markdown("""
 st.markdown("""
 <div class="main-header">
     <h1>🔍🧠 SmartSearch AI Pro</h1>
-    <h3>16-Source Search + AI Synthesis | Powered by TinyLLaMA</h3>
+    <h4>16-Source Search + AI Synthesis | All-in-One Solution</h4>
 </div>
 """, unsafe_allow_html=True)
 
@@ -530,293 +1021,172 @@ with st.sidebar:
     
     st.divider()
     
-    st.header("🔧 Search & AI Settings")
+    st.header("🔧 Settings")
     
-    col1, col2 = st.columns(2)
-    with col1:
-        auto_search = st.toggle("Auto-Search", value=True, 
-                              help="Automatically search 16 sources before AI responds")
-    with col2:
-        show_raw = st.toggle("Show Raw Data", value=False, 
-                           help="Show raw search results in expander")
-    
-    search_mode = st.radio(
-        "Search Mode:",
-        ["Quick (8 sources)", "Standard (12 sources)", "Full (16 sources)"],
-        index=1
-    )
+    auto_search = st.toggle("Auto-Search 16 Sources", value=True)
+    show_details = st.toggle("Show Search Details", value=False)
     
     st.divider()
     
     st.header("⚙️ AI Parameters")
+    
     temperature = st.slider(
-        "AI Creativity:",
-        0.1, 1.5, 0.7, 0.1,
-        help="Higher = more creative, Lower = more factual"
+        "Creativity:",
+        0.1, 1.5, 0.7, 0.1
     )
     
     response_length = st.slider(
         "Response Length:",
-        256, 2048, 768, 128
+        256, 1024, 512, 128
     )
     
     st.divider()
     
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🔄 New Chat", use_container_width=True, type="secondary"):
-            st.session_state.messages = []
-            st.session_state.search_results = {}
-            st.session_state.search_analysis = {}
-            st.rerun()
-    
-    with col2:
-        if st.button("🔍 Search Only", use_container_width=True, type="secondary"):
-            if st.session_state.messages:
-                last_query = st.session_state.messages[-1]["content"]
-                with st.spinner(f"Searching 16 sources for: {last_query[:50]}..."):
-                    results = search_all_sources(last_query)
-                    st.session_state.search_results = results
-                    st.session_state.search_analysis = analyze_search_results(last_query, results)
-                st.rerun()
+    if st.button("🔄 New Chat", use_container_width=True):
+        st.session_state.messages = []
+        st.session_state.search_results = {}
+        st.session_state.search_analysis = {}
+        st.rerun()
     
     st.divider()
-    st.caption("**16 Search Sources:**")
+    
+    st.markdown("**16 Search Sources:**")
     st.caption("🌐 Web: DuckDuckGo, Wikipedia, News")
-    st.caption("🔬 Research: ArXiv, PubMed, GitHub")
+    st.caption("🔬 Research: ArXiv, PubMed")
     st.caption("📚 Reference: Dictionary, Books, Quotes")
+    st.caption("💻 Developer: GitHub, Stack Overflow")
     st.caption("🌍 Location: Weather, Air Quality, Geocoding")
-    st.caption("🤖 AI: TinyLLaMA 1.1B Synthesis")
 
 # Load AI model
 if st.session_state.model is None:
-    with st.spinner("🚀 Loading AI Model (first time may take a minute)..."):
-        try:
-            st.session_state.model = load_ai_model()
-            st.success("✅ AI Model Ready!")
-        except Exception as e:
-            st.error(f"❌ Failed to load AI: {str(e)}")
-            st.stop()
+    with st.spinner("🚀 Initializing AI..."):
+        st.session_state.model = load_ai_model()
 
-# Display chat history
+# Display chat
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
-        
-        # Show metadata if available
-        if "metadata" in message:
-            if "sources" in message["metadata"]:
-                st.markdown("**Sources used:** " + ", ".join(message["metadata"]["sources"][:8]) + "...")
 
-# Main chat interface
+# Chat input
 if prompt := st.chat_input("Ask me anything..."):
-
-    # Add user message
     st.session_state.messages.append({"role": "user", "content": prompt})
     
     with st.chat_message("user"):
         st.markdown(prompt)
     
-    # Prepare assistant response
     with st.chat_message("assistant"):
-        
-        # Step 1: Independent 16-Source Search
+        # Step 1: Search
         search_results = {}
         search_analysis = {}
         
         if auto_search:
-            # Show search status
-            search_placeholder = st.empty()
-            search_placeholder.info("🔍 Searching all 16 sources simultaneously...")
+            search_status = st.empty()
+            search_status.info("🔍 Searching 16 sources...")
             
-            # Perform independent search
-            with st.spinner(f"Querying 16 sources: DuckDuckGo, Wikipedia, ArXiv, PubMed, GitHub, etc..."):
+            with st.spinner("Querying: Wikipedia, DuckDuckGo, ArXiv, GitHub, Weather, etc..."):
                 search_results = search_all_sources(prompt)
-                
-                if search_results:
-                    search_analysis = analyze_search_results(prompt, search_results)
-                    
-                    # Display search summary
-                    working_sources = len(search_analysis.get('working_sources', []))
-                    confidence = search_analysis.get('confidence_score', 'low')
-                    
-                    confidence_class = f"confidence-{confidence}"
-                    
-                    search_placeholder.markdown(f"""
-                    <div class="search-card">
-                        <h4>✅ Search Complete</h4>
-                        <p><strong>Sources queried:</strong> 16 | <strong>Working:</strong> {working_sources}</p>
-                        <p><strong>Confidence:</strong> <span class="source-badge {confidence_class}">{confidence.upper()}</span></p>
-                        <p><strong>Key facts extracted:</strong> {len(search_analysis.get('key_facts', []))}</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    # Show working sources
-                    st.markdown("**Working Sources:**")
-                    cols = st.columns(6)
-                    for idx, source in enumerate(search_analysis.get('working_sources', [])[:12]):
-                        with cols[idx % 6]:
+                search_analysis = analyze_search_results(prompt, search_results)
+            
+            working_count = len(search_analysis.get('working_sources', []))
+            confidence = search_analysis.get('confidence_score', 'low')
+            
+            search_status.success(f"✅ Found data from {working_count}/16 sources (Confidence: {confidence})")
+            
+            # Show sources
+            if show_details:
+                with st.expander("📊 Search Results", expanded=False):
+                    cols = st.columns(4)
+                    sources = search_analysis.get('working_sources', [])
+                    for idx, source in enumerate(sources):
+                        with cols[idx % 4]:
                             st.markdown(f'<span class="source-badge">{source}</span>', unsafe_allow_html=True)
-                    
-                    # Show raw data if requested
-                    if show_raw:
-                        with st.expander("📊 View Raw Search Results", expanded=False):
-                            for source, data in search_results.items():
-                                st.subheader(f"📌 {source.replace('_', ' ').title()}")
-                                st.json(data)
-                
-                else:
-                    search_placeholder.warning("⚠️ No search results returned. AI will respond based on its knowledge.")
         
         # Step 2: AI Synthesis
-        ai_placeholder = st.empty()
-        ai_placeholder.info("🧠 Synthesizing 16-source results with AI...")
-        
-        try:
-            # Create synthesis prompt with all 16 sources
-            synthesis_prompt = create_synthesis_prompt(
-                query=prompt,
-                conversation_history=st.session_state.messages,
-                system_prompt=st.session_state.system_prompt,
-                search_results=search_results,
-                search_analysis=search_analysis
-            )
+        if st.session_state.model:
+            ai_status = st.empty()
+            ai_status.info("🧠 AI is synthesizing information...")
             
-            # Generate AI response
-            with st.spinner("AI is synthesizing information from all sources..."):
-                ai_response = generate_ai_response(
-                    st.session_state.model,
-                    synthesis_prompt,
-                    max_tokens=response_length,
-                    temperature=temperature
+            try:
+                # Create prompt
+                synthesis_prompt = create_synthesis_prompt(
+                    prompt,
+                    st.session_state.messages,
+                    st.session_state.system_prompt,
+                    search_results,
+                    search_analysis
                 )
-            
-            # Clear placeholder and show response
-            ai_placeholder.empty()
-            
-            # Display AI response in a nice box
-            st.markdown("""
-            <div class="ai-response-box">
-                <h4>🤖 AI Synthesis</h4>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            st.markdown(ai_response)
-            
-            # Add source attribution
-            if search_analysis.get('working_sources'):
-                st.markdown("---")
-                st.markdown("**📊 Sources Synthesized:**")
                 
-                # Group sources by category
-                categories = {
-                    "Web": ["duckduckgo", "duckduckgo_instant", "news", "wikipedia", "wikidata"],
-                    "Research": ["arxiv", "pubmed", "github", "stackoverflow"],
-                    "Reference": ["dictionary", "books", "quotes", "country"],
-                    "Location": ["weather", "air_quality", "geocoding"]
-                }
+                # Generate response
+                with st.spinner("Thinking..."):
+                    ai_response = generate_ai_response(
+                        st.session_state.model,
+                        synthesis_prompt,
+                        max_tokens=response_length,
+                        temperature=temperature
+                    )
                 
-                for category, sources in categories.items():
-                    category_sources = [s for s in sources if s in search_analysis['working_sources']]
-                    if category_sources:
-                        st.markdown(f"**{category}:** {', '.join(category_sources)}")
+                ai_status.empty()
+                st.markdown(ai_response)
+                
+                # Store message
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": ai_response,
+                    "metadata": {
+                        "sources": search_analysis.get('working_sources', []),
+                        "confidence": confidence
+                    }
+                })
+                
+                # Store search data
+                st.session_state.search_results = search_results
+                st.session_state.search_analysis = search_analysis
+                
+            except Exception as e:
+                ai_status.error(f"AI Error: {str(e)}")
+                st.info("Showing search results instead...")
+                
+                # Fallback: Show formatted search results
+                if search_results:
+                    st.markdown("### Search Results Summary:")
+                    
+                    # Show Wikipedia if available
+                    if "wikipedia" in search_results and isinstance(search_results["wikipedia"], dict):
+                        wiki = search_results["wikipedia"]
+                        if "summary" in wiki:
+                            st.markdown(f"**Wikipedia:** {wiki['summary'][:300]}...")
+                    
+                    # Show instant answer if available
+                    if "duckduckgo_instant" in search_results and isinstance(search_results["duckduckgo_instant"], dict):
+                        instant = search_results["duckduckgo_instant"]
+                        if "answer" in instant:
+                            st.markdown(f"**Quick Answer:** {instant['answer']}")
+        else:
+            st.warning("⚠️ AI model not loaded. Showing search results only.")
             
-            # Store message with metadata
-            metadata = {
-                "sources": search_analysis.get('working_sources', []),
-                "confidence": search_analysis.get('confidence_score', 'unknown'),
-                "total_sources": 16,
-                "working_sources": len(search_analysis.get('working_sources', [])),
-                "response_type": "ai_synthesis"
-            }
-            
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": ai_response,
-                "metadata": metadata
-            })
-            
-            # Store search results for later reference
-            st.session_state.search_results = search_results
-            st.session_state.search_analysis = search_analysis
-            
-        except Exception as e:
-            ai_placeholder.error(f"❌ AI Synthesis Failed: {str(e)}")
-            
-            # Fallback: Provide formatted search results without AI
-            st.warning("AI synthesis unavailable. Here are the search results:")
-            
-            # Format and display search results directly
             if search_results:
-                # Your existing format_results function
-                from your_original_code import format_results  # You'll need to import this
-                formatted = format_results(prompt, search_results)
-                st.markdown(formatted)
-            
-            fallback_response = "I found search results but couldn't synthesize them with AI. Above are the raw results."
-            
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": fallback_response,
-                "metadata": {"error": str(e), "fallback": True}
-            })
+                st.markdown("### Raw Search Results:")
+                st.json(search_results)
 
-# Quick questions examples
+# Quick examples
 if not st.session_state.messages:
-    st.markdown("### 💡 Try These Queries (Tests all 16 sources):")
+    st.markdown("### 💡 Example Queries:")
     
     examples = [
-        ("Climate change effects", "Tests weather, research, news sources"),
-        ("Python machine learning", "Tests GitHub, Stack Overflow, ArXiv"),
-        ("Paris France", "Tests geocoding, weather, country info"),
-        ("Quantum computing basics", "Tests Wikipedia, ArXiv, dictionary"),
-        ("COVID-19 latest research", "Tests PubMed, news, Wikipedia")
+        "Climate change effects",
+        "Python machine learning tutorials",
+        "Weather in Tokyo",
+        "Latest AI research papers",
+        "GitHub repositories for web development"
     ]
     
-    for query, desc in examples:
-        if st.button(f"🔍 {query}", help=desc, use_container_width=True):
-            st.session_state.messages.append({"role": "user", "content": query})
-            st.rerun()
-    
-    st.divider()
-    
-    # Architecture explanation
-    with st.expander("🔄 How It Works", expanded=True):
-        st.markdown("""
-        ### 🏗️ Architecture:
-        ```
-        1. User Query
-           ↓
-        2. INDEPENDENT 16-SOURCE SEARCH (Runs separately)
-           ├──🌐 Web: DuckDuckGo, Wikipedia, News
-           ├──🔬 Research: ArXiv, PubMed
-           ├──📚 Reference: Dictionary, Books, Quotes
-           ├──💻 Developer: GitHub, Stack Overflow
-           ├──🌍 Location: Weather, Air Quality, Geocoding
-           └──🗃️ Data: Wikidata, Countries
-           ↓
-        3. Results Aggregation & Analysis
-           ↓
-        4. AI SYNTHESIS (TinyLLaMA 1.1B)
-           ├── Receives search results as input
-           ├── Applies selected persona
-           ├── Synthesizes information
-           └── Generates thoughtful response
-           ↓
-        5. Response + Source Attribution
-        ```
-        
-        **Key Principles:**
-        - Search runs **completely independently** from AI
-        - AI only processes **already-gathered** information
-        - No HuggingFace restrictions violated
-        - Transparent source attribution
-        - 16 specialized sources for comprehensive coverage
-        """)
+    cols = st.columns(3)
+    for idx, example in enumerate(examples):
+        with cols[idx % 3]:
+            if st.button(example, use_container_width=True):
+                st.session_state.messages.append({"role": "user", "content": example})
+                st.rerun()
 
 # Footer
 st.divider()
-st.caption("""
-**SmartSearch AI Pro v2.0** | 16 Independent Sources + AI Synthesis | 
-Model: TinyLLaMA 1.1B Chat | Architecture: Search → Aggregate → Synthesize
-""")
+st.caption("SmartSearch AI Pro | 16 Search Sources + TinyLLaMA AI | All code in one file")
