@@ -616,4 +616,4 @@ if prompt := st.chat_input("Search anything..."):
     st.session_state.messages.append({
         "role": "assistant", 
         "content": combined_response
-    })v
+    })
