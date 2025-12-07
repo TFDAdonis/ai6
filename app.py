@@ -893,169 +893,166 @@ def load_ai_model():
         return None
 
 # ============================================
-# AI SYNTHESIS FUNCTIONS - FIXED VERSION
+# AI SYNTHESIS FUNCTIONS - SIMPLE FIX
 # ============================================
-def extract_search_data(search_results: dict, working_sources: list) -> str:
-    """Extract and format concrete data from search results."""
-    formatted_data = []
+def extract_first_search_result(search_results: dict, working_sources: list) -> str:
+    """Extract ONLY THE FIRST VALID SEARCH RESULT."""
     
-    for source_name in working_sources:
-        data = search_results.get(source_name)
-        if not data:
-            continue
+    # Priority order of sources (Wikipedia first, then web, etc.)
+    source_priority = [
+        "wikipedia", 
+        "duckduckgo", 
+        "duckduckgo_instant", 
+        "news", 
+        "arxiv", 
+        "dictionary"
+    ]
+    
+    for source in source_priority:
+        if source in working_sources and source in search_results:
+            data = search_results[source]
             
-        try:
-            if source_name == "wikipedia" and isinstance(data, dict):
+            if source == "wikipedia" and isinstance(data, dict):
                 if data.get('summary'):
-                    formatted_data.append(f"📚 Wikipedia: {data['summary'][:200]}")
-                    
-            elif source_name == "arxiv" and isinstance(data, list) and data:
-                for item in data[:2]:
-                    if isinstance(item, dict) and item.get('summary'):
-                        formatted_data.append(f"📄 Research Paper: {item['summary'][:150]}")
-                        
-            elif source_name == "duckduckgo" and isinstance(data, list) and data:
-                for item in data[:2]:
-                    if isinstance(item, dict) and item.get('body') and item['body']:
-                        formatted_data.append(f"🌐 Web Result: {item['body'][:150]}")
-                        
-            elif source_name == "duckduckgo_instant" and isinstance(data, dict):
+                    return f"📚 Wikipedia: {data['summary'][:250]}"
+            
+            elif source == "duckduckgo" and isinstance(data, list) and data:
+                first_item = data[0]
+                if isinstance(first_item, dict) and first_item.get('body'):
+                    return f"🌐 Web: {first_item['body'][:200]}"
+                elif isinstance(first_item, dict) and first_item.get('title'):
+                    return f"🌐 Web: {first_item['title'][:150]}"
+            
+            elif source == "duckduckgo_instant" and isinstance(data, dict):
                 if data.get('answer'):
-                    formatted_data.append(f"💡 Instant Answer: {data['answer'][:150]}")
+                    return f"💡 Instant Answer: {data['answer'][:200]}"
                 elif data.get('abstract'):
-                    formatted_data.append(f"💡 Abstract: {data['abstract'][:150]}")
-                    
-            elif source_name == "dictionary" and isinstance(data, dict):
-                if data.get('meanings'):
-                    first_meaning = data['meanings'][0]
-                    if first_meaning.get('definitions'):
-                        def_text = first_meaning['definitions'][0]['definition'][:120]
-                        formatted_data.append(f"📖 Definition: {def_text}")
-                        
-            elif source_name == "news" and isinstance(data, list) and data:
-                for item in data[:2]:
-                    if isinstance(item, dict) and item.get('body') and item['body']:
-                        formatted_data.append(f"📰 News: {item['body'][:150]}")
-                        
-            elif source_name == "weather" and isinstance(data, dict):
-                if data.get('condition') and data.get('condition') != 'N/A':
-                    formatted_data.append(f"🌤️ Weather: {data.get('location', 'Location')}: {data.get('condition')} at {data.get('temperature_c')}°C")
-                    
-        except Exception as e:
-            continue
+                    return f"💡 Abstract: {data['abstract'][:200]}"
     
-    return formatted_data
+    # If no priority sources, get any valid data
+    for source in working_sources:
+        if source in search_results:
+            data = search_results[source]
+            if isinstance(data, list) and data:
+                first_item = data[0]
+                if isinstance(first_item, dict):
+                    for field in ['summary', 'body', 'content', 'title']:
+                        if field in first_item and first_item[field]:
+                            return f"🔍 {source}: {first_item[field][:150]}"
+    
+    return "No specific search data found."
 
 def create_synthesis_prompt(query: str, conversation_history: list, system_prompt: str, 
                            search_results: dict, search_analysis: dict) -> str:
-    """Create prompt for AI to synthesize search results - FORCING SEARCH USAGE."""
+    """Create prompt for AI - FORCE USE OF FIRST SEARCH RESULT ONLY."""
     
     working_sources = search_analysis.get('working_sources', [])
-    failed_sources = search_analysis.get('failed_sources', [])
     
-    # Extract concrete data from search results
-    search_data_items = extract_search_data(search_results, working_sources)
-    
-    # Format search summary
-    search_summary = "**SEARCH RESULTS DATA - USE ONLY THIS INFORMATION:**\n\n"
-    
-    if search_data_items:
-        search_summary += "**AVAILABLE INFORMATION FROM SEARCH:**\n"
-        for idx, item in enumerate(search_data_items[:6], 1):
-            search_summary += f"{idx}. {item}\n"
-    else:
-        search_summary += "**NO CONCRETE DATA FOUND IN SEARCH**\n"
-        search_summary += "Please state: 'Search returned limited or no specific information on this topic.'\n"
-    
-    search_summary += f"\n**SEARCH METADATA:**\n"
-    search_summary += f"• Sources with data: {len(working_sources)}/16\n"
-    search_summary += f"• Working sources: {', '.join(working_sources[:5])}\n"
-    search_summary += f"• Confidence level: {search_analysis.get('confidence_score', 'low')}\n"
+    # Get ONLY THE FIRST search result
+    first_result = extract_first_search_result(search_results, working_sources)
     
     # STRICT INSTRUCTIONS
-    instructions = """
-**CRITICAL INSTRUCTIONS - FOLLOW EXACTLY:**
+    instructions = f"""
+**CRITICAL - READ CAREFULLY:**
 
-1. **USE ONLY SEARCH RESULTS ABOVE** - Do NOT use your own knowledge or training data
-2. **IF NO DATA, SAY SO** - If search found nothing, clearly state this
-3. **CITE SOURCES** - Mention which search sources provided information
-4. **NO INVENTION** - Do not make up facts, dates, numbers, or details
-5. **LIMITED SCOPE** - If search was limited, acknowledge this clearly
-6. **USE FIRST RESULTS** - When multiple sources exist, prioritize the first/best match
+You must use ONLY this search result data. Do NOT use any other knowledge.
 
-**RESPONSE STRUCTURE:**
-1. Start with: "Based on search results from [X] sources:"
-2. List key findings from search (only what's in search results)
-3. Mention source limitations if applicable
-4. End with: "Additional sources would provide more comprehensive information."
+**SEARCH RESULT (USE THIS EXACTLY):**
+{first_result}
+
+**RULES:**
+1. Paraphrase the search result above in your own words
+2. Do NOT add any information not in the search result
+3. Do NOT mention science, technology, or other topics unless in search result
+4. Start with "According to search results:"
+5. Keep it simple and factual
+6. If search result is empty or unclear, say "Search results were inconclusive"
+
+**Query:** {query}
 """
 
-    # Add conversation history
-    history = ""
-    for msg in conversation_history[-2:]:
-        role = "User" if msg["role"] == "user" else "Assistant"
-        history += f"{role}: {msg['content']}\n"
-    
-    # Create final prompt with strict formatting
     prompt = f"""<|system|>
 {system_prompt}
 
-You are an assistant that STRICTLY USES ONLY SEARCH RESULTS provided below.
-Your task is to report what was found in the search, NOT to generate new information.
-
-{search_summary}
+You are a search result summarizer. Your ONLY job is to paraphrase search results.
 
 {instructions}
 </s>
 
 <|user|>
-Query: "{query}"
+Based on the search result above, answer this query: "{query}"
 
-**IMPORTANT:**
-1. What information did the search ACTUALLY find?
-2. What specific data points are available from search?
-3. Which sources provided this information?
-4. How comprehensive was the search coverage?
-
-**DO NOT:**
-- Invent facts not in search results
-- Use your training knowledge
-- Speculate beyond what search found
-- Provide details not explicitly in search data
-
-**Previous conversation context:**
-{history}
-
-Now provide a response based SOLELY on the search results above.
+Remember: Use ONLY the search result. No extra information.
 </s>
 
 <|assistant|>
-Based on search results from {len(working_sources)} sources:"""
-    
+According to search results:"""
+
     return prompt
 
-def generate_ai_response(model, prompt: str, max_tokens: int = 512, temperature: float = 0.3) -> str:
-    """Generate AI response with strict search adherence."""
+def generate_ai_response(model, prompt: str, max_tokens: int = 256, temperature: float = 0.2) -> str:
+    """Generate AI response with VERY strict constraints."""
     try:
         response = model(
             prompt,
             max_new_tokens=max_tokens,
-            temperature=0.3,  # Low temperature for factual responses
-            top_p=0.8,
-            repetition_penalty=1.2,
-            stop=["</s>", "<|user|>", "\n\nUser:", "###", "**Note:", "\n\nNote:"],
+            temperature=0.2,  # Very low temperature - almost deterministic
+            top_p=0.7,
+            repetition_penalty=1.3,
+            stop=["</s>", "<|user|>", "\n\n", "###", "**"],
             stream=False
         )
         
         response_text = response.strip()
         
-        # Ensure response references search
-        if not any(keyword in response_text.lower() for keyword in ['search', 'result', 'found', 'according to', 'source']):
-            response_text = "Based on search results: " + response_text
+        # Force search reference
+        if not response_text.startswith("According to search results:"):
+            response_text = "According to search results: " + response_text
+        
+        # Limit length
+        if len(response_text) > 300:
+            response_text = response_text[:300] + "..."
         
         return response_text
     except Exception as e:
-        return f"I apologize, but I encountered an error while processing search results: {str(e)}"
+        return f"Error: {str(e)}"
+
+# ============================================
+# DISPLAY FUNCTIONS - Show actual search data
+# ============================================
+def display_search_results(search_results: dict, working_sources: list):
+    """Display actual search results clearly."""
+    
+    # Display the ACTUAL search results
+    st.markdown("### 🔍 Actual Search Results Found:")
+    
+    # Show Wikipedia first
+    if "wikipedia" in working_sources and search_results.get("wikipedia"):
+        wiki = search_results["wikipedia"]
+        if isinstance(wiki, dict) and wiki.get('summary'):
+            with st.expander("📚 Wikipedia Result", expanded=True):
+                st.markdown(f"**{wiki.get('title', 'Tulip Era')}**")
+                st.markdown(wiki.get('summary', '')[:300])
+                if wiki.get('url'):
+                    st.caption(f"[Read more]({wiki['url']})")
+    
+    # Show DuckDuckGo results
+    if "duckduckgo" in working_sources and search_results.get("duckduckgo"):
+        ddg = search_results["duckduckgo"]
+        if isinstance(ddg, list) and ddg:
+            with st.expander("🌐 Web Results", expanded=False):
+                for i, result in enumerate(ddg[:2]):
+                    if isinstance(result, dict):
+                        st.markdown(f"**{result.get('title', f'Result {i+1}')}**")
+                        if result.get('body'):
+                            st.markdown(result['body'][:150] + "...")
+                        if result.get('url'):
+                            st.caption(f"[Source]({result['url']})")
+    
+    # Show other sources count
+    other_sources = [s for s in working_sources if s not in ["wikipedia", "duckduckgo"]]
+    if other_sources:
+        st.caption(f"📊 Also found data from: {', '.join(other_sources[:3])}")
 
 # ============================================
 # STREAMLIT UI
@@ -1098,7 +1095,7 @@ st.markdown("""
 st.markdown("""
 <div class="main-header">
     <h1>🔍🧠 SmartSearch AI Pro</h1>
-    <h4>16-Source Search + AI Synthesis | Search-First Approach</h4>
+    <h4>16-Source Search + AI Paraphrasing | Search-First Mode</h4>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1121,23 +1118,22 @@ with st.sidebar:
     st.header("🔧 Settings")
     
     auto_search = st.toggle("Auto-Search 16 Sources", value=True)
-    show_details = st.toggle("Show Search Details", value=False)
-    force_search_only = st.toggle("Force Search-Only Mode", value=True, 
-                                  help="AI will ONLY use search results, no training knowledge")
+    show_raw_results = st.toggle("Show Raw Search Results", value=True, 
+                                  help="Show actual search data before AI response")
     
     st.divider()
     
     st.header("⚙️ AI Parameters")
     
     temperature = st.slider(
-        "Creativity:",
-        0.1, 1.5, 0.3, 0.1,
-        help="Lower = more factual, Higher = more creative"
+        "Temperature:",
+        0.1, 1.0, 0.2, 0.1,
+        help="Lower = more factual (0.2 recommended for search-only mode)"
     )
     
     response_length = st.slider(
         "Response Length:",
-        256, 1024, 512, 128
+        150, 500, 250, 50
     )
     
     st.divider()
@@ -1159,7 +1155,7 @@ with st.sidebar:
     
     st.divider()
     
-    st.caption("⚠️ AI uses search results only when available")
+    st.caption("⚠️ AI only paraphrases search results")
 
 # Load AI model
 if st.session_state.model is None:
@@ -1174,15 +1170,11 @@ for message in st.session_state.messages:
         # Show search metadata if available
         if message["role"] == "assistant" and "metadata" in message:
             metadata = message["metadata"]
-            cols = st.columns(3)
+            cols = st.columns(2)
             with cols[0]:
-                st.caption(f"📊 Sources: {len(metadata.get('sources', []))}/16")
+                st.caption(f"📊 Sources used: {len(metadata.get('sources', []))}/16")
             with cols[1]:
-                confidence = metadata.get('confidence', 'unknown')
-                st.caption(f"🎯 Confidence: {confidence}")
-            with cols[2]:
-                if force_search_only:
-                    st.caption("🔒 Search-Only Mode")
+                st.caption("🔒 Search-Only Mode")
 
 # Chat input
 if prompt := st.chat_input("Ask me anything..."):
@@ -1198,61 +1190,25 @@ if prompt := st.chat_input("Ask me anything..."):
         
         if auto_search:
             search_status = st.empty()
-            search_status.info("🔍 Searching 16 sources simultaneously...")
+            search_status.info("🔍 Searching 16 sources...")
             
-            with st.spinner("Querying: Wikipedia, DuckDuckGo, ArXiv, GitHub, Weather, etc..."):
+            with st.spinner("Getting real data from sources..."):
                 search_results = search_all_sources(prompt)
                 search_analysis = analyze_search_results(prompt, search_results)
             
             working_count = len(search_analysis.get('working_sources', []))
-            confidence = search_analysis.get('confidence_score', 'low')
             
-            # Display search summary
-            cols = st.columns(3)
-            with cols[0]:
-                st.metric("Sources Found", f"{working_count}/16")
-            with cols[1]:
-                confidence_color = {
-                    'high': 'green',
-                    'medium': 'orange',
-                    'low': 'red'
-                }.get(confidence, 'gray')
-                st.metric("Confidence", confidence.capitalize())
-            with cols[2]:
-                if force_search_only:
-                    st.metric("Mode", "🔒 Search-Only")
-            
-            # Show search data preview
-            if show_details and working_count > 0:
-                with st.expander("📊 View Raw Search Data", expanded=False):
-                    # Display first few data items
-                    search_data_items = extract_search_data(search_results, search_analysis.get('working_sources', []))
-                    if search_data_items:
-                        st.markdown("**Extracted Search Data:**")
-                        for item in search_data_items[:3]:
-                            st.markdown(f"• {item}")
-                    else:
-                        st.info("No concrete data extracted from search results")
-                    
-                    # Show all sources status
-                    st.markdown("**All Sources Status:**")
-                    all_sources = ["wikipedia", "duckduckgo", "arxiv", "news", "dictionary", 
-                                  "weather", "github", "stackoverflow", "pubmed", "books",
-                                  "quotes", "country", "geocoding", "air_quality", "wikidata", "duckduckgo_instant"]
-                    
-                    cols = st.columns(4)
-                    for idx, source in enumerate(all_sources):
-                        status = "✅" if source in search_analysis.get('working_sources', []) else "❌"
-                        with cols[idx % 4]:
-                            st.caption(f"{status} {source}")
+            # SHOW ACTUAL SEARCH RESULTS FIRST
+            if show_raw_results and working_count > 0:
+                display_search_results(search_results, search_analysis.get('working_sources', []))
         
-        # Step 2: AI Synthesis
+        # Step 2: AI Synthesis (FORCED TO USE SEARCH)
         if st.session_state.model:
             ai_status = st.empty()
-            ai_status.info("🧠 AI is synthesizing search results...")
+            ai_status.info("🧠 Paraphrasing search results...")
             
             try:
-                # Create prompt with search enforcement
+                # Create prompt with FORCED search usage
                 synthesis_prompt = create_synthesis_prompt(
                     prompt,
                     st.session_state.messages,
@@ -1261,8 +1217,8 @@ if prompt := st.chat_input("Ask me anything..."):
                     search_analysis
                 )
                 
-                # Generate response with search-only enforcement
-                with st.spinner("Processing search results..."):
+                # Generate response
+                with st.spinner("Processing..."):
                     ai_response = generate_ai_response(
                         st.session_state.model,
                         synthesis_prompt,
@@ -1271,61 +1227,60 @@ if prompt := st.chat_input("Ask me anything..."):
                     )
                 
                 ai_status.empty()
+                
+                # Display AI response
                 st.markdown(ai_response)
                 
-                # Store message with metadata
+                # Show disclaimer
+                st.caption("⚠️ This response is based ONLY on search results, not AI knowledge")
+                
+                # Store message
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": ai_response,
                     "metadata": {
                         "sources": search_analysis.get('working_sources', []),
-                        "confidence": confidence,
-                        "search_only": force_search_only,
-                        "working_count": working_count
+                        "working_count": working_count,
+                        "search_based": True
                     }
                 })
-                
-                # Store search data
-                st.session_state.search_results = search_results
-                st.session_state.search_analysis = search_analysis
                 
             except Exception as e:
                 ai_status.error(f"AI Error: {str(e)}")
                 
-                # Fallback: Show formatted search results
-                st.info("Showing raw search results due to AI error...")
-                
-                if search_results and working_count > 0:
-                    st.markdown("### Search Results Summary:")
-                    
-                    # Show available data
-                    search_data_items = extract_search_data(search_results, search_analysis.get('working_sources', []))
-                    if search_data_items:
-                        for item in search_data_items[:5]:
-                            st.markdown(f"• {item}")
-                    else:
-                        st.info("Search returned limited or no specific information.")
+                # Show raw search data instead
+                st.info("Showing raw search data:")
+                if search_results.get("wikipedia"):
+                    wiki = search_results["wikipedia"]
+                    if isinstance(wiki, dict) and wiki.get('summary'):
+                        st.markdown(f"**Wikipedia says:** {wiki['summary'][:200]}...")
+                elif search_results.get("duckduckgo"):
+                    ddg = search_results["duckduckgo"]
+                    if isinstance(ddg, list) and ddg and ddg[0].get('body'):
+                        st.markdown(f"**Web result:** {ddg[0]['body'][:200]}...")
                 else:
-                    st.warning("⚠️ Search returned no data from any sources.")
+                    st.warning("No search data found")
         else:
-            st.warning("⚠️ AI model not loaded. Showing search results only.")
-            
-            if search_results and working_count > 0:
-                st.markdown("### Search Results Summary:")
-                search_data_items = extract_search_data(search_results, search_analysis.get('working_sources', []))
-                for item in search_data_items[:5]:
-                    st.markdown(f"• {item}")
+            # Show search results directly
+            st.warning("AI model not loaded. Showing search results:")
+            if search_results.get("wikipedia"):
+                wiki = search_results["wikipedia"]
+                st.markdown(f"**From Wikipedia:** {wiki.get('summary', 'No summary')[:200]}...")
+            elif search_results.get("duckduckgo"):
+                ddg = search_results["duckduckgo"]
+                if isinstance(ddg, list) and ddg and ddg[0].get('body'):
+                    st.markdown(f"**Web result:** {ddg[0]['body'][:200]}...")
 
 # Quick examples
 if not st.session_state.messages:
     st.markdown("### 💡 Example Queries:")
     
     examples = [
-        "Climate change effects",
-        "Python machine learning tutorials",
+        "Tulip Era",
         "Weather in Tokyo",
-        "Latest AI research papers",
-        "GitHub repositories for web development"
+        "Machine learning",
+        "Python programming",
+        "Climate change"
     ]
     
     cols = st.columns(3)
@@ -1337,4 +1292,4 @@ if not st.session_state.messages:
 
 # Footer
 st.divider()
-st.caption("SmartSearch AI Pro | 16 Search Sources + TinyLLaMA AI | 🔒 Search-First Approach")
+st.caption("SmartSearch AI Pro | 16 Search Sources + TinyLLaMA AI | 🔒 Search-First Paraphrasing Only")
